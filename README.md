@@ -325,6 +325,7 @@ pollInterval = setInterval(() => { ... }, 500); // 500ms
 MIT
 
 ---
+// redeploy trigger
 
 **Version:** 0.1.0  
 **Status:** MVP Feature Complete  
