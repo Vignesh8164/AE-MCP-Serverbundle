@@ -479,6 +479,19 @@ const mcpSessions = new Map();
 
 async function handleMcpRequest(req, res) {
   try {
+    // Some clients (including certain hosted integrations) may call GET /mcp
+    // without explicitly sending `Accept: text/event-stream`.
+    // The MCP streamable transport requires SSE accept headers for GET, so we
+    // normalize here for compatibility while still using the official SDK.
+    if (req.method === "GET") {
+      const accept = String(req.headers.accept || "");
+      if (!accept.toLowerCase().includes("text/event-stream")) {
+        req.headers.accept = accept
+          ? `${accept}, text/event-stream`
+          : "text/event-stream";
+      }
+    }
+
     const sessionId = req.headers["mcp-session-id"];
     let session = sessionId ? mcpSessions.get(sessionId) : undefined;
 
