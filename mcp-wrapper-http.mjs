@@ -479,17 +479,18 @@ const mcpSessions = new Map();
 
 async function handleMcpRequest(req, res) {
   try {
-    // Some clients (including certain hosted integrations) may call GET /mcp
-    // without explicitly sending `Accept: text/event-stream`.
-    // The MCP streamable transport requires SSE accept headers for GET, so we
-    // normalize here for compatibility while still using the official SDK.
-    if (req.method === "GET") {
-      const accept = String(req.headers.accept || "");
-      if (!accept.toLowerCase().includes("text/event-stream")) {
-        req.headers.accept = accept
-          ? `${accept}, text/event-stream`
-          : "text/event-stream";
-      }
+    // Streamable HTTP transport requires SSE negotiation headers.
+    // Some clients omit them, so we normalize here before handing off to the
+    // official @modelcontextprotocol/sdk transport.
+    const accept = String(req.headers.accept || "");
+    if (!/text\/event-stream/i.test(accept)) {
+      req.headers.accept = accept
+        ? `${accept}, text/event-stream`
+        : "text/event-stream";
+    }
+
+    if (req.method === "POST" && !req.headers["content-type"]) {
+      req.headers["content-type"] = "application/json";
     }
 
     const sessionId = req.headers["mcp-session-id"];
