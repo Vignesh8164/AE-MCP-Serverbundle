@@ -196,14 +196,30 @@ const TOOL_DEFS = [
   ["shape_transfer",              "Copy first shape path from src to dst layer"],
 ];
 
+const TOOL_SCHEMAS = {
+  create_composition: {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Composition name" },
+      width: { type: "number", description: "Comp width in pixels" },
+      height: { type: "number", description: "Comp height in pixels" },
+      duration: { type: "number", description: "Duration in seconds" },
+      frameRate: { type: "number", description: "Frames per second" },
+    },
+    required: ["name", "width", "height", "duration"],
+    additionalProperties: true,
+  },
+};
+
 const TOOLS = TOOL_DEFS.map(([name, description]) => ({
   name,
   description,
-  inputSchema: {
-    type: "object",
-    properties: {},
-    additionalProperties: true,
-  },
+  inputSchema:
+    TOOL_SCHEMAS[name] || {
+      type: "object",
+      properties: {},
+      additionalProperties: true,
+    },
 }));
 
 const TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
@@ -283,7 +299,42 @@ async function runTool(toolName, args) {
   if (!TOOL_NAMES.has(toolName)) {
     throw new Error(`Unknown tool: ${toolName}`);
   }
-  const cmd = enqueueCommand(toolName, args);
+
+  const normalizeNumber = (value, fallback) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  };
+
+  let normalizedArgs = args || {};
+  if (toolName === "create_composition") {
+    normalizedArgs = {
+      ...normalizedArgs,
+      name:
+        normalizedArgs.name ||
+        normalizedArgs.compName ||
+        normalizedArgs.compositionName ||
+        normalizedArgs.comp_name ||
+        "TestComp",
+      width: normalizeNumber(
+        normalizedArgs.width ?? normalizedArgs.compWidth ?? normalizedArgs.w,
+        1920
+      ),
+      height: normalizeNumber(
+        normalizedArgs.height ?? normalizedArgs.compHeight ?? normalizedArgs.h,
+        1080
+      ),
+      duration: normalizeNumber(
+        normalizedArgs.duration ?? normalizedArgs.durationSeconds ?? normalizedArgs.seconds,
+        10
+      ),
+      frameRate: normalizeNumber(
+        normalizedArgs.frameRate ?? normalizedArgs.fps,
+        30
+      ),
+    };
+  }
+
+  const cmd = enqueueCommand(toolName, normalizedArgs);
   return awaitCommand(cmd);
 }
 
