@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>AE MCP Bridge</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        @keyframes gridMove {
+            0%   { background-position: 0 0, 0 0; }
+            100% { background-position: 40px 40px, 40px 40px; }
+        }
+        @keyframes scan {
+            0%   { transform: translateY(-100%); }
+            100% { transform: translateY(100%); }
+        }
+        @keyframes pulseRed {
+            0%, 100% { box-shadow: 0 0 8px #ff2d55, inset 0 0 6px rgba(255,45,85,.25); }
+            50%      { box-shadow: 0 0 22px #ff2d55, inset 0 0 14px rgba(255,45,85,.5); }
+        }
+        @keyframes pulseGreen {
+            0%, 100% { box-shadow: 0 0 8px #00ff9f, inset 0 0 6px rgba(0,255,159,.2); }
+            50%      { box-shadow: 0 0 20px #00ff9f, inset 0 0 14px rgba(0,255,159,.45); }
+        }
+        @keyframes flicker {
+            0%, 100% { opacity: 1; }
+            50%      { opacity: .82; }
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(4px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+
+        html, body { height: 100%; }
+        body {
+            font-family: 'Consolas', 'Courier New', monospace;
+            background: #0a0a0f;
+            color: #d8f3ff;
+            padding: 12px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* animated grid background */
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            background-image:
+                linear-gradient(rgba(0,240,255,.05) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0,240,255,.05) 1px, transparent 1px);
+            background-size: 40px 40px;
+            animation: gridMove 12s linear infinite;
+            z-index: 0;
+        }
+        /* scanline sweep */
+        body::after {
+            content: "";
+            position: fixed;
+            left: 0; right: 0;
+            height: 120px;
+            pointer-events: none;
+            background: linear-gradient(180deg, transparent, rgba(0,255,159,.04), transparent);
+            animation: scan 6s linear infinite;
+            z-index: 0;
+        }
+        .wrap { position: relative; z-index: 1; animation: fadeIn .35s ease-out; }
+
+        .titlebar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 10px;
+            letter-spacing: 3px;
+            color: #6affd2;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+            opacity: .8;
+        }
+        .titlebar .dot {
+            display: inline-block;
+            width: 8px; height: 8px;
+            background: #00ff9f;
+            border-radius: 50%;
+            margin-right: 6px;
+            box-shadow: 0 0 8px #00ff9f;
+        }
+
+        .status {
+            position: relative;
+            padding: 14px 16px;
+            margin-bottom: 12px;
+            border-radius: 4px;
+            font-weight: 700;
+            font-size: 18px;
+            letter-spacing: 4px;
+            text-align: center;
+            border: 1px solid;
+            background: rgba(0,0,0,.55);
+            backdrop-filter: blur(2px);
+            text-transform: uppercase;
+            transition: color .25s, border-color .25s;
+        }
+        .status.connected {
+            color: #00ff9f;
+            border-color: #00ff9f;
+            text-shadow: 0 0 8px #00ff9f, 0 0 18px rgba(0,255,159,.6);
+            animation: pulseGreen 2.4s ease-in-out infinite;
+        }
+        .status.disconnected {
+            color: #ff2d55;
+            border-color: #ff2d55;
+            text-shadow: 0 0 8px #ff2d55, 0 0 18px rgba(255,45,85,.6);
+            animation: pulseRed 1.4s ease-in-out infinite;
+        }
+        .status.executing {
+            color: #c490ff;
+            border-color: #c490ff;
+            text-shadow: 0 0 8px #c490ff;
+        }
+
+        .controls { margin: 10px 0 12px; display: flex; gap: 8px; }
+
+        button {
+            flex: 1;
+            background: rgba(10,15,25,.6);
+            color: #e8fff7;
+            border: 1px solid #00ff9f;
+            padding: 10px 14px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 12px;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            font-weight: 700;
+            position: relative;
+            overflow: hidden;
+            transition: transform .12s ease, box-shadow .2s, background .2s, color .2s;
+            box-shadow: 0 0 6px rgba(0,255,159,.35), inset 0 0 6px rgba(0,255,159,.15);
+        }
+        button::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(120deg, transparent 30%, rgba(0,255,159,.22), transparent 70%);
+            transform: translateX(-100%);
+            transition: transform .5s;
+        }
+        button:hover {
+            transform: scale(1.03);
+            background: rgba(0,255,159,.08);
+            box-shadow: 0 0 16px #00ff9f, inset 0 0 10px rgba(0,255,159,.3);
+            color: #00ff9f;
+        }
+        button:hover::after { transform: translateX(100%); }
+        button:active { transform: scale(.97); }
+
+        button.danger {
+            border-color: #ff2d55;
+            color: #ffd3dd;
+            box-shadow: 0 0 6px rgba(255,45,85,.4), inset 0 0 6px rgba(255,45,85,.15);
+        }
+        button.danger:hover {
+            color: #ff2d55;
+            background: rgba(255,45,85,.08);
+            box-shadow: 0 0 16px #ff2d55, inset 0 0 10px rgba(255,45,85,.3);
+        }
+        button.danger::after {
+            background: linear-gradient(120deg, transparent 30%, rgba(255,45,85,.22), transparent 70%);
+        }
+
+        input {
+            width: 100%;
+            padding: 10px 12px;
+            background: rgba(10,15,25,.7);
+            color: #00f0ff;
+            border: 1px solid rgba(0,240,255,.35);
+            border-radius: 3px;
+            font-family: inherit;
+            font-size: 13px;
+            letter-spacing: 1.5px;
+            outline: none;
+            transition: box-shadow .2s, border-color .2s;
+            margin-bottom: 4px;
+            text-shadow: 0 0 6px rgba(0,240,255,.5);
+        }
+        input::placeholder { color: rgba(0,240,255,.35); }
+        input:focus {
+            border-color: #00f0ff;
+            box-shadow: 0 0 14px rgba(0,240,255,.55), inset 0 0 8px rgba(0,240,255,.15);
+        }
+
+        .log-wrap {
+            position: relative;
+            margin-top: 10px;
+            border: 1px solid rgba(0,255,159,.3);
+            border-radius: 4px;
+            box-shadow: 0 0 14px rgba(0,255,159,.18), inset 0 0 18px rgba(0,255,159,.05);
+            overflow: hidden;
+        }
+        .log-header {
+            padding: 6px 10px;
+            background: rgba(0,255,159,.08);
+            color: #6affd2;
+            font-size: 10px;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            border-bottom: 1px solid rgba(0,255,159,.25);
+            display: flex; justify-content: space-between;
+        }
+        #log {
+            background: rgba(0,5,8,.85);
+            color: #00ff9f;
+            padding: 10px 12px;
+            height: 180px;
+            overflow-y: auto;
+            font-size: 11px;
+            font-family: 'Consolas', 'Courier New', monospace;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            text-shadow: 0 0 4px rgba(0,255,159,.55);
+            position: relative;
+        }
+        #log::-webkit-scrollbar { width: 6px; }
+        #log::-webkit-scrollbar-track { background: rgba(0,255,159,.05); }
+        #log::-webkit-scrollbar-thumb {
+            background: rgba(0,255,159,.4);
+            box-shadow: 0 0 6px #00ff9f;
+            border-radius: 3px;
+        }
+        #log .line {
+            animation: fadeIn .25s ease-out;
+            display: block;
+        }
+        #log .ts { color: #00f0ff; opacity: .75; margin-right: 6px; }
+        #log .err { color: #ff5577; text-shadow: 0 0 4px rgba(255,85,119,.7); }
+        #log .ok  { color: #00ff9f; }
+
+        .log-wrap::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+            background: repeating-linear-gradient(
+                to bottom,
+                rgba(0,255,159,.03) 0px,
+                rgba(0,255,159,.03) 1px,
+                transparent 1px,
+                transparent 3px
+            );
+            mix-blend-mode: overlay;
+        }
+    </style>
+</head>
+<body>
+    <div class="wrap">
+        <div class="titlebar">
+            <span><span class="dot"></span>AE//MCP-BRIDGE v0.1</span>
+            <span>SYS::ONLINE</span>
+        </div>
+
+        <div class="status disconnected" id="status">DISCONNECTED</div>
+
+        <input type="text" id="serverUrl" placeholder="server endpoint" value="localhost:3000">
+
+        <div class="controls">
+            <button onclick="connect()">▸ Connect</button>
+            <button class="danger" onclick="disconnect()">■ Disconnect</button>
+        </div>
+
+        <div class="log-wrap">
+            <div class="log-header">
+                <span>// console</span>
+                <span id="logCount">0 lines</span>
+            </div>
+            <div id="log"></div>
+        </div>
+    </div>
+
+    <script src="csinterface.js"></script>
+    <script src="mcp-panel.js"></script>
+</body>
+</html>
