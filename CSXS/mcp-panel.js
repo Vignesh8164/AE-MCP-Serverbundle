@@ -1,6 +1,17 @@
 let csInterface = (typeof CSInterface !== "undefined") ? new CSInterface() : null;
 let connected = false;
 let serverUrl = "";
+
+function getBaseUrl() {
+  let input = document.getElementById('serverUrl').value.trim();
+  let cleanUrl = input.replace(/^https?:\/\//i, '');
+  
+  if (cleanUrl.includes('herokuapp.com')) {
+    return 'https://' + cleanUrl;
+  } else {
+    return 'http://' + cleanUrl;
+  }
+}
 let pollInterval = null;
 
 window.addEventListener("DOMContentLoaded", () => {
@@ -34,21 +45,22 @@ function updateStatus(isConnected) {
 
 function connect() {
   const urlInput = document.getElementById("serverUrl");
-  serverUrl = urlInput.value || "localhost:3000";
+  serverUrl = urlInput.value || "ae-mcp-server-2026.herokuapp.com";
 
-  log(`Connecting to http://${serverUrl}...`);
-  fetch(`http://${serverUrl}/api/commands/pending`)
+  const base = getBaseUrl();
+  log(`Connecting to ${base}...`);
+  fetch(`${base}/api/commands/pending`)
     .then(res => {
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
       return res.json();
     })
     .then(() => {
       updateStatus(true);
-      log("Connected to MCP server");
+      log(`Connected to MCP server at ${base}`);
       startPolling();
     })
     .catch(err => {
-      log(`Connection failed: ${err.message}`);
+      log(`Connection failed: ${err.message} (URL: ${base}/api/commands/pending)`);
       updateStatus(false);
     });
 }
@@ -65,8 +77,12 @@ function startPolling() {
   pollInterval = setInterval(() => {
     if (!connected) return;
 
-    fetch(`http://${serverUrl}/api/commands/pending`)
-      .then(res => res.json())
+    const base = getBaseUrl();
+    fetch(`${base}/api/commands/pending`)
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+        return res.json();
+      })
       .then(commands => {
         if (commands.length === 0) return;
 
@@ -76,7 +92,7 @@ function startPolling() {
         });
       })
       .catch(err => {
-        log(`Poll error: ${err.message}`);
+        log(`Poll error: ${err.message} (URL: ${base}/api/commands/pending)`);
         updateStatus(false);
       });
   }, 500);
@@ -245,15 +261,18 @@ function buildRenderComp(params) {
 }
 
 function reportResult(cmdId, status, result, error) {
-  fetch(`http://${serverUrl}/api/command/${cmdId}/result`, {
+  const base = getBaseUrl();
+  const url = `${base}/api/command/${cmdId}/result`;
+  fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status, result, error })
   })
-  .then(() => {
+  .then(res => {
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
     log(`Result reported: ${cmdId} = ${status}`);
   })
   .catch(err => {
-    log(`Report error: ${err.message}`);
+    log(`Report error: ${err.message} (URL: ${url})`);
   });
 }
