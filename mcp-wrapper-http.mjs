@@ -62,6 +62,9 @@
 import express from "express";
 import cors from "cors";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -87,6 +90,10 @@ const SERVER_NAME = "ae-mcp-server";
 const SERVER_VERSION = "1.0.0";
 const FOUNDRY_AGENT_RULE =
   "You MUST follow tool descriptions strictly. If a tool says 'ONLY for NEW', never use it for existing items. If a tool says 'ONLY for EXISTING', never use it to create new items. Prefer the most specific matching tool.";
+const DEBUG_LOG_ENABLED = process.env.AE_DEBUG_LOG !== "false";
+const COMMAND_AUDIT_LIMIT = Number(process.env.AE_COMMAND_AUDIT_LIMIT || 200);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // --------------------------------------------------------------------------
 // Tool registry - 102 After Effects tools
@@ -275,19 +282,173 @@ function buildStrictToolDescription(name, baseDescription) {
   return `${GLOBAL_TOOL_SELECTION_RULES}\n\nUse this tool ONLY for its stated action. Action: ${base}.`;
 }
 
-const TOOL_SCHEMAS = {
-  create_composition: {
+function parseToolArgHintsFromJsx() {
+  const jsxPath = path.join(__dirname, "jsx", "ae-bridge.jsx");
+  if (!fs.existsSync(jsxPath)) {
+    return {};
+  }
+
+  const source = fs.readFileSync(jsxPath, "utf8");
+  const dispatchMatch = source.match(/function\s+dispatchCommand\(command,\s*params\)\s*\{([\s\S]*?)\n\}/);
+  if (!dispatchMatch) {
+    return {};
+  }
+
+  const block = dispatchMatch[1];
+  const hintMap = {};
+  const casePattern = /case\s+"([^"]+)":\s*\n\s*return\s+[^(]+\(([^)]*)\);/g;
+  let match;
+
+  while ((match = casePattern.exec(block))) {
+    const tool = match[1];
+    const argList = match[2]
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((entry) => {
+        const token = entry.match(/^params\.([A-Za-z0-9_]+)/);
+        return token ? token[1] : entry;
+      });
+    hintMap[tool] = argList;
+  }
+
+  return hintMap;
+}
+
+const TOOL_ARG_HINTS = parseToolArgHintsFromJsx();
+
+const STRICT_REQUIRED_FIELDS = {
+  create_composition: ["name", "width", "height", "duration"],
+  add_layer: ["compName", "layerName", "layerType"],
+  modify_property: ["compName", "layerName", "property", "value"],
+  apply_expression: ["layerName", "propertyName", "expression"],
+  add_effect: ["layerName", "effectMatchName"],
+  set_keyframe: ["layerName", "propertyName", "timeInSeconds", "value"],
+  render_comp: ["compName"],
+  set_text_content: ["layerName", "text"],
+  set_comp_background_color: ["compName", "color"],
+  add_to_render_queue: ["compName"],
+  set_render_output: ["compName"],
+  execute_arbitrary_jsx: ["jsxCode"],
+  marker_manager: ["action"],
+  comp_settings: ["compName"],
+};
+
+function inferSchemaForParam(paramName) {
+  const name = String(paramName || "");
+  const lower = name.toLowerCase();
+
+  if (!name) return {};
+
+  if (
+    lower === "layernames" ||
+    lower === "propertynames" ||
+    lower === "layerindices"
+  ) {
+    const itemType = lower === "layerindices" ? "number" : "string";
+    return {
+      type: "array",
+      items: { type: itemType },
+      description: `${name} list`,
+    };
+  }
+
+  if (lower.endsWith("color") || lower.includes("position") || lower.includes("point")) {
+    return {
+      type: "array",
+      items: { type: "number" },
+      description: `${name} numeric array`,
+    };
+  }
+
+  if (
+    lower.startsWith("is") ||
+    lower.startsWith("has") ||
+    lower.startsWith("enable") ||
+    lower.startsWith("lock") ||
+    lower.startsWith("shy") ||
+    lower.includes("casesensitive") ||
+    lower.includes("opennewcomp") ||
+    lower.includes("moveallattributes")
+  ) {
+    return { type: "boolean", description: name };
+  }
+
+  if (
+    lower.includes("width") ||
+    lower.includes("height") ||
+    lower.includes("duration") ||
+    lower.includes("time") ||
+    lower.includes("rate") ||
+    lower.includes("fps") ||
+    lower.includes("index") ||
+    lower.includes("count") ||
+    lower.includes("size") ||
+    lower.includes("zoom") ||
+    lower.includes("opacity") ||
+    lower.includes("rotation") ||
+    lower.includes("amount") ||
+    lower.includes("frequency") ||
+    lower.includes("influence") ||
+    lower.includes("speed") ||
+    lower.includes("percent") ||
+    lower.includes("offset") ||
+    lower.includes("intensity") ||
+    lower.includes("miter") ||
+    lower.includes("pixelaspect") ||
+    lower.includes("strokewidth") ||
+    lower.includes("number")
+  ) {
+    return { type: "number", description: name };
+  }
+
+  if (
+    lower === "settings" ||
+    lower === "style" ||
+    lower === "propertyvalues" ||
+    lower === "params"
+  ) {
+    return { type: "object", additionalProperties: true, description: name };
+  }
+
+  if (lower === "value") {
+    return { description: "Property value" };
+  }
+
+  return { type: "string", description: name };
+}
+
+function buildSchemaFromHints(toolName) {
+  const argHints = TOOL_ARG_HINTS[toolName] || [];
+  const properties = {};
+  argHints.forEach((arg) => {
+    properties[arg] = inferSchemaForParam(arg);
+  });
+
+  return {
     type: "object",
-    properties: {
-      name: { type: "string", description: "Composition name" },
-      width: { type: "number", description: "Comp width in pixels" },
-      height: { type: "number", description: "Comp height in pixels" },
-      duration: { type: "number", description: "Duration in seconds" },
-      frameRate: { type: "number", description: "Frames per second" },
-    },
-    required: ["name", "width", "height", "duration"],
+    properties,
+    required: STRICT_REQUIRED_FIELDS[toolName] || [],
     additionalProperties: true,
+  };
+}
+
+const TOOL_SCHEMAS = TOOL_DEFS.reduce((acc, [toolName]) => {
+  acc[toolName] = buildSchemaFromHints(toolName);
+  return acc;
+}, {});
+
+TOOL_SCHEMAS.create_composition = {
+  type: "object",
+  properties: {
+    name: { type: "string", description: "Composition name" },
+    width: { type: "number", description: "Comp width in pixels" },
+    height: { type: "number", description: "Comp height in pixels" },
+    duration: { type: "number", description: "Duration in seconds" },
+    frameRate: { type: "number", description: "Frames per second" },
   },
+  required: ["name", "width", "height", "duration"],
+  additionalProperties: true,
 };
 
 const TOOLS = TOOL_DEFS.map(([name, description]) => ({
@@ -303,36 +464,378 @@ const TOOLS = TOOL_DEFS.map(([name, description]) => ({
 
 const TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
 
+const COMMAND_ALIASES = {
+  create_text_layer: "__macro_create_text_layer",
+  get_active_comp: "get_active_comp_info",
+  set_text_layer_content: "set_text_content",
+  render_composition: "render_comp",
+};
+
+const commandAuditLog = [];
+
+function pushCommandAudit(event, payload) {
+  const entry = {
+    ts: new Date().toISOString(),
+    event,
+    payload: sanitizeForLog(payload),
+  };
+  commandAuditLog.push(entry);
+  if (commandAuditLog.length > COMMAND_AUDIT_LIMIT) {
+    commandAuditLog.splice(0, commandAuditLog.length - COMMAND_AUDIT_LIMIT);
+  }
+}
+
+function sanitizeForLog(value, depth = 0) {
+  if (depth > 3) return "[max-depth]";
+  if (value === null || value === undefined) return value;
+  if (typeof value === "string") {
+    return value.length > 500 ? `${value.slice(0, 500)}...[truncated]` : value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (Array.isArray(value)) {
+    const arr = value.slice(0, 20).map((v) => sanitizeForLog(v, depth + 1));
+    if (value.length > 20) arr.push(`[+${value.length - 20} more]`);
+    return arr;
+  }
+  if (typeof value === "object") {
+    const out = {};
+    const keys = Object.keys(value).slice(0, 30);
+    keys.forEach((k) => {
+      out[k] = sanitizeForLog(value[k], depth + 1);
+    });
+    if (Object.keys(value).length > 30) {
+      out.__truncated = `+${Object.keys(value).length - 30} more keys`;
+    }
+    return out;
+  }
+  return String(value);
+}
+
+function logEvent(level, event, payload = {}) {
+  if (!DEBUG_LOG_ENABLED && level === "debug") return;
+  const line = {
+    ts: new Date().toISOString(),
+    level,
+    event,
+    ...sanitizeForLog(payload),
+  };
+  const serialized = JSON.stringify(line);
+  if (level === "error") {
+    console.error(serialized);
+  } else if (level === "warn") {
+    console.warn(serialized);
+  } else {
+    console.log(serialized);
+  }
+}
+
+function coerceNumber(value, fallback = undefined) {
+  if (value === null || value === undefined || value === "") return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function coerceBoolean(value, fallback = undefined) {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const normalized = String(value).trim().toLowerCase();
+  if (["true", "1", "yes", "y", "on"].includes(normalized)) return true;
+  if (["false", "0", "no", "n", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function coerceNumberArray(value) {
+  if (Array.isArray(value)) {
+    return value.map((v) => Number(v)).filter((v) => Number.isFinite(v));
+  }
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((v) => Number(v.trim()))
+      .filter((v) => Number.isFinite(v));
+  }
+  return value;
+}
+
+function coerceStringArray(value) {
+  if (Array.isArray(value)) {
+    return value.map((v) => String(v));
+  }
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean);
+  }
+  return value;
+}
+
+function normalizeValueByName(name, value) {
+  const lower = String(name || "").toLowerCase();
+
+  if (lower === "layernames" || lower === "propertynames") {
+    return coerceStringArray(value);
+  }
+  if (lower === "layerindices") {
+    return coerceNumberArray(value);
+  }
+  if (lower.endsWith("color") || lower.includes("position") || lower.includes("point")) {
+    return coerceNumberArray(value);
+  }
+  if (
+    lower.startsWith("is") ||
+    lower.startsWith("has") ||
+    lower.startsWith("enable") ||
+    lower.startsWith("lock") ||
+    lower.startsWith("shy") ||
+    lower.includes("casesensitive") ||
+    lower.includes("opennewcomp") ||
+    lower.includes("moveallattributes")
+  ) {
+    return coerceBoolean(value, value);
+  }
+  if (
+    lower.includes("width") ||
+    lower.includes("height") ||
+    lower.includes("duration") ||
+    lower.includes("time") ||
+    lower.includes("rate") ||
+    lower.includes("fps") ||
+    lower.includes("index") ||
+    lower.includes("count") ||
+    lower.includes("size") ||
+    lower.includes("zoom") ||
+    lower.includes("opacity") ||
+    lower.includes("rotation") ||
+    lower.includes("amount") ||
+    lower.includes("frequency") ||
+    lower.includes("influence") ||
+    lower.includes("percent") ||
+    lower.includes("offset") ||
+    lower.includes("intensity") ||
+    lower.includes("miter") ||
+    lower.includes("pixelaspect") ||
+    lower.includes("strokewidth") ||
+    lower.includes("number")
+  ) {
+    return coerceNumber(value, value);
+  }
+  return value;
+}
+
+function normalizeArgs(toolName, args) {
+  const input = args && typeof args === "object" ? args : {};
+  const normalized = {};
+
+  Object.entries(input).forEach(([key, value]) => {
+    normalized[key] = normalizeValueByName(key, value);
+  });
+
+  if (toolName === "create_composition") {
+    normalized.name =
+      normalized.name ||
+      normalized.compName ||
+      normalized.compositionName ||
+      normalized.comp_name ||
+      "TestComp";
+    normalized.width = coerceNumber(normalized.width ?? normalized.compWidth ?? normalized.w, 1920);
+    normalized.height = coerceNumber(normalized.height ?? normalized.compHeight ?? normalized.h, 1080);
+    normalized.duration = coerceNumber(
+      normalized.duration ?? normalized.durationSeconds ?? normalized.seconds,
+      10
+    );
+    normalized.frameRate = coerceNumber(normalized.frameRate ?? normalized.fps, 30);
+  }
+
+  return normalized;
+}
+
+function validateArgs(toolName, args) {
+  const schema = TOOL_SCHEMAS[toolName] || { required: [], properties: {} };
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  const missing = required.filter((field) => {
+    const value = args[field];
+    return value === undefined || value === null || value === "";
+  });
+
+  if (missing.length > 0) {
+    return { valid: false, errors: missing.map((field) => `Missing required field: ${field}`) };
+  }
+
+  const typeErrors = [];
+  const properties = schema.properties || {};
+  Object.entries(properties).forEach(([field, fieldSchema]) => {
+    if (!fieldSchema || !fieldSchema.type || !(field in args)) return;
+    const value = args[field];
+    if (value === undefined || value === null) return;
+
+    if (fieldSchema.type === "array" && !Array.isArray(value)) {
+      typeErrors.push(`Field ${field} must be array`);
+      return;
+    }
+    if (fieldSchema.type === "object" && (typeof value !== "object" || Array.isArray(value))) {
+      typeErrors.push(`Field ${field} must be object`);
+      return;
+    }
+    if (fieldSchema.type === "string" && typeof value !== "string") {
+      typeErrors.push(`Field ${field} must be string`);
+      return;
+    }
+    if (fieldSchema.type === "number" && typeof value !== "number") {
+      typeErrors.push(`Field ${field} must be number`);
+      return;
+    }
+    if (fieldSchema.type === "boolean" && typeof value !== "boolean") {
+      typeErrors.push(`Field ${field} must be boolean`);
+    }
+  });
+
+  if (typeErrors.length > 0) {
+    return { valid: false, errors: typeErrors };
+  }
+
+  return { valid: true, errors: [] };
+}
+
+function parseCommandEnvelope(payload) {
+  const body = payload && typeof payload === "object" ? payload : {};
+  if (typeof body.action === "string") {
+    return { action: body.action, params: body.params || {}, protocol: "action" };
+  }
+  if (typeof body.tool === "string") {
+    return { action: body.tool, params: body.args ?? body.params ?? {}, protocol: "tool" };
+  }
+  if (body.command && typeof body.command === "object") {
+    return parseCommandEnvelope(body.command);
+  }
+  throw new Error("Invalid command envelope. Use { action, params } or { tool, args }.");
+}
+
+function expandActionToCommands(action, params) {
+  const resolved = COMMAND_ALIASES[action] || action;
+  const safeParams = params && typeof params === "object" ? params : {};
+
+  if (resolved === "__macro_create_text_layer") {
+    const compName =
+      safeParams.compName ||
+      safeParams.compositionName ||
+      safeParams.composition ||
+      safeParams.comp;
+    if (!compName) {
+      throw new Error("create_text_layer requires params.compName (or compositionName)");
+    }
+    if (!safeParams.text) {
+      throw new Error("create_text_layer requires params.text");
+    }
+    const layerName = safeParams.layerName || `Text_${Date.now()}`;
+    const commands = [
+      {
+        tool: "add_layer",
+        params: { compName, layerName, layerType: "text" },
+      },
+      {
+        tool: "set_text_content",
+        params: { layerName, text: safeParams.text },
+      },
+    ];
+
+    if (Array.isArray(safeParams.position)) {
+      commands.push({
+        tool: "modify_property",
+        params: {
+          compName,
+          layerName,
+          property: "position",
+          value: safeParams.position,
+        },
+      });
+    }
+
+    return commands;
+  }
+
+  if (!TOOL_NAMES.has(resolved)) {
+    throw new Error(`Unknown action/tool: ${action}`);
+  }
+
+  return [{ tool: resolved, params: safeParams }];
+}
+
+function toExecutionPlan(payload) {
+  const { action, params, protocol } = parseCommandEnvelope(payload);
+  const expanded = expandActionToCommands(action, params);
+  const commands = expanded.map((item) => {
+    const normalizedParams = normalizeArgs(item.tool, item.params);
+    const validation = validateArgs(item.tool, normalizedParams);
+    if (!validation.valid) {
+      throw new Error(`Validation failed for ${item.tool}: ${validation.errors.join("; ")}`);
+    }
+    return { tool: item.tool, params: normalizedParams };
+  });
+  return { action, protocol, commands };
+}
+
 // --------------------------------------------------------------------------
 // Command queue (in-memory). Same shape the AE panel already understands.
 // --------------------------------------------------------------------------
 
 /** @type {Array<{
  *    id: string,
+ *    traceId: string,
+ *    source: string,
  *    tool: string,
  *    type: string,
  *    params: any,
+ *    jsxPreview?: string,
  *    status: 'pending' | 'completed' | 'failed',
  *    result?: any,
  *    error?: string,
+ *    debug?: any,
  *    createdAt: number,
+ *    completedAt?: number,
  *    resolve?: (v: any) => void,
  *    reject?: (e: Error) => void,
  *    timer?: any,
  * }> } */
 let commandQueue = [];
 
-function enqueueCommand(tool, params) {
+function buildJsxPreview(tool, params) {
+  if (tool === "execute_arbitrary_jsx" && params && typeof params.jsxCode === "string") {
+    return params.jsxCode.slice(0, 500);
+  }
+  const snippet = `JSON.stringify(dispatchCommand(${JSON.stringify(tool)}, ${JSON.stringify(params || {})}))`;
+  return snippet.length > 500 ? `${snippet.slice(0, 500)}...[truncated]` : snippet;
+}
+
+function enqueueCommand(tool, params, meta = {}) {
   const id = randomUUID();
   const cmd = {
     id,
+    traceId: meta.traceId || randomUUID(),
+    source: meta.source || "unknown",
     tool,
     type: tool,
     params: params || {},
+    jsxPreview: buildJsxPreview(tool, params),
     status: "pending",
     createdAt: Date.now(),
   };
   commandQueue.push(cmd);
+  pushCommandAudit("command_queued", {
+    id: cmd.id,
+    traceId: cmd.traceId,
+    source: cmd.source,
+    tool: cmd.tool,
+    params: cmd.params,
+    jsxPreview: cmd.jsxPreview,
+  });
+  logEvent("info", "command_queued", {
+    commandId: cmd.id,
+    traceId: cmd.traceId,
+    source: cmd.source,
+    tool: cmd.tool,
+  });
   return cmd;
 }
 
@@ -344,19 +847,50 @@ function awaitCommand(cmd) {
       if (cmd.status === "pending") {
         cmd.status = "failed";
         cmd.error = `Timeout after ${COMMAND_TIMEOUT_MS}ms - is the AE CEP panel connected?`;
+        cmd.completedAt = Date.now();
+        pushCommandAudit("command_timeout", {
+          id: cmd.id,
+          traceId: cmd.traceId,
+          tool: cmd.tool,
+          error: cmd.error,
+        });
+        logEvent("error", "command_timeout", {
+          commandId: cmd.id,
+          traceId: cmd.traceId,
+          tool: cmd.tool,
+          error: cmd.error,
+        });
         reject(new Error(cmd.error));
       }
     }, COMMAND_TIMEOUT_MS);
   });
 }
 
-function finalizeCommand(id, status, result, error) {
+function finalizeCommand(id, status, result, error, debug) {
   const cmd = commandQueue.find((c) => c.id === id);
   if (!cmd) return false;
   if (cmd.timer) clearTimeout(cmd.timer);
   cmd.status = status;
   cmd.result = result;
   cmd.error = error;
+  cmd.debug = debug;
+  cmd.completedAt = Date.now();
+  pushCommandAudit("command_completed", {
+    id: cmd.id,
+    traceId: cmd.traceId,
+    tool: cmd.tool,
+    status,
+    error,
+    result,
+    debug,
+  });
+  logEvent(status === "failed" ? "error" : "info", "command_completed", {
+    commandId: cmd.id,
+    traceId: cmd.traceId,
+    tool: cmd.tool,
+    status,
+    error,
+  });
   if (status === "completed" && cmd.resolve) cmd.resolve(result);
   if (status === "failed" && cmd.reject) cmd.reject(new Error(error || "failed"));
   return true;
@@ -374,47 +908,173 @@ setInterval(() => {
  * Run a tool by queuing it and waiting for the AE panel to report a result.
  * Returns the result payload (whatever AE sent back) or throws on failure.
  */
-async function runTool(toolName, args) {
+async function runToolWithMeta(toolName, args, meta = {}) {
   if (!TOOL_NAMES.has(toolName)) {
     throw new Error(`Unknown tool: ${toolName}`);
   }
 
-  const normalizeNumber = (value, fallback) => {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : fallback;
-  };
-
-  let normalizedArgs = args || {};
-  if (toolName === "create_composition") {
-    normalizedArgs = {
-      ...normalizedArgs,
-      name:
-        normalizedArgs.name ||
-        normalizedArgs.compName ||
-        normalizedArgs.compositionName ||
-        normalizedArgs.comp_name ||
-        "TestComp",
-      width: normalizeNumber(
-        normalizedArgs.width ?? normalizedArgs.compWidth ?? normalizedArgs.w,
-        1920
-      ),
-      height: normalizeNumber(
-        normalizedArgs.height ?? normalizedArgs.compHeight ?? normalizedArgs.h,
-        1080
-      ),
-      duration: normalizeNumber(
-        normalizedArgs.duration ?? normalizedArgs.durationSeconds ?? normalizedArgs.seconds,
-        10
-      ),
-      frameRate: normalizeNumber(
-        normalizedArgs.frameRate ?? normalizedArgs.fps,
-        30
-      ),
-    };
+  const normalizedArgs = normalizeArgs(toolName, args || {});
+  const validation = validateArgs(toolName, normalizedArgs);
+  if (!validation.valid) {
+    throw new Error(`Validation failed for ${toolName}: ${validation.errors.join("; ")}`);
   }
 
-  const cmd = enqueueCommand(toolName, normalizedArgs);
-  return awaitCommand(cmd);
+  const cmd = enqueueCommand(toolName, normalizedArgs, meta);
+  const result = await awaitCommand(cmd);
+  return { commandId: cmd.id, result };
+}
+
+async function runTool(toolName, args, meta = {}) {
+  const execution = await runToolWithMeta(toolName, args, meta);
+  return execution.result;
+}
+
+async function executePlannedCommands(plan, options = {}) {
+  const wait = options.wait !== false;
+  const source = options.source || "rest";
+  const traceId = options.traceId || randomUUID();
+  const results = [];
+
+  for (const item of plan.commands) {
+    if (!wait) {
+      const queued = enqueueCommand(item.tool, item.params, { traceId, source });
+      results.push({
+        commandId: queued.id,
+        status: "queued",
+        tool: item.tool,
+      });
+      continue;
+    }
+
+    const execution = await runToolWithMeta(item.tool, item.params, { traceId, source });
+    results.push({
+      commandId: execution.commandId,
+      status: "completed",
+      tool: item.tool,
+      result: execution.result,
+    });
+  }
+
+  return {
+    traceId,
+    action: plan.action,
+    protocol: plan.protocol,
+    commands: plan.commands.map((c) => ({ tool: c.tool, params: c.params })),
+    results,
+  };
+}
+
+const AZURE_OPENAI_CONFIG = {
+  endpoint: process.env.AZURE_OPENAI_ENDPOINT,
+  apiKey: process.env.AZURE_OPENAI_API_KEY,
+  deployment: process.env.AZURE_OPENAI_DEPLOYMENT,
+  apiVersion: process.env.AZURE_OPENAI_API_VERSION || "2024-10-21",
+};
+
+function isAzureConfigured() {
+  return Boolean(
+    AZURE_OPENAI_CONFIG.endpoint &&
+    AZURE_OPENAI_CONFIG.apiKey &&
+    AZURE_OPENAI_CONFIG.deployment
+  );
+}
+
+function buildPromptTemplate() {
+  const toolList = TOOLS.map((t) => t.name).join(", ");
+  return [
+    "You are a deterministic command planner for Adobe After Effects MCP.",
+    "Return ONLY valid JSON. No markdown. No explanations outside JSON.",
+    "Schema:",
+    "{",
+    '  "commands": [',
+    "    {",
+    '      "action": "<one_tool_name_from_allowed_list>",',
+    '      "params": { "key": "value" }',
+    "    }",
+    "  ]",
+    "}",
+    "Rules:",
+    "- Always emit at least one command.",
+    "- Use only actions from the allowed list.",
+    "- Keep params minimal but executable.",
+    "- Do not invent unsupported parameters.",
+    "- If user asks for text layer creation, use action create_text_layer with params { compName, layerName, text, position? }.",
+    `Allowed actions: ${toolList}, create_text_layer`,
+  ].join("\n");
+}
+
+function extractFirstJsonBlock(text) {
+  if (!text || typeof text !== "string") {
+    throw new Error("Model returned empty response");
+  }
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error("Model response did not contain JSON object");
+  }
+  return text.slice(start, end + 1);
+}
+
+async function parsePromptWithAzure(prompt, context = {}) {
+  if (!isAzureConfigured()) {
+    throw new Error(
+      "Azure OpenAI is not configured. Set AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, AZURE_OPENAI_DEPLOYMENT."
+    );
+  }
+
+  const endpoint = String(AZURE_OPENAI_CONFIG.endpoint).replace(/\/$/, "");
+  const url = `${endpoint}/openai/deployments/${AZURE_OPENAI_CONFIG.deployment}/chat/completions?api-version=${AZURE_OPENAI_CONFIG.apiVersion}`;
+
+  const messages = [
+    { role: "system", content: buildPromptTemplate() },
+    {
+      role: "user",
+      content: JSON.stringify({
+        prompt,
+        context,
+      }),
+    },
+  ];
+
+  logEvent("info", "llm_prompt_received", { prompt, context });
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "api-key": AZURE_OPENAI_CONFIG.apiKey,
+    },
+    body: JSON.stringify({
+      messages,
+      temperature: 0,
+      max_tokens: 800,
+    }),
+  });
+
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(`Azure OpenAI error: ${response.status} ${JSON.stringify(body)}`);
+  }
+
+  const content = body?.choices?.[0]?.message?.content;
+  const parsed = JSON.parse(extractFirstJsonBlock(content));
+  if (!parsed || !Array.isArray(parsed.commands) || parsed.commands.length === 0) {
+    throw new Error("LLM returned invalid command plan");
+  }
+
+  const normalized = parsed.commands.map((command) => {
+    const plan = toExecutionPlan({
+      action: command.action,
+      params: command.params || {},
+    });
+    return plan.commands;
+  }).flat();
+
+  return {
+    prompt,
+    raw: content,
+    commands: normalized,
+  };
 }
 
 // --------------------------------------------------------------------------
@@ -427,10 +1087,18 @@ app.use(express.json({ limit: "5mb" }));
 
 // Lightweight request log (one line per request) - helpful on Heroku.
 app.use((req, _res, next) => {
+  req.requestId = randomUUID();
+  _res.setHeader("x-request-id", req.requestId);
   const t0 = Date.now();
   _res.on("finish", () => {
     const ms = Date.now() - t0;
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} -> ${_res.statusCode} ${ms}ms`);
+    logEvent("info", "http_request", {
+      requestId: req.requestId,
+      method: req.method,
+      path: req.originalUrl,
+      statusCode: _res.statusCode,
+      durationMs: ms,
+    });
   });
   next();
 });
@@ -452,6 +1120,8 @@ app.get("/health", (_req, res) => {
     aePanelConnected: commandQueue.some((c) => c.status === "pending")
       ? "unknown (commands pending)"
       : "unknown (no traffic yet)",
+    commandAuditEntries: commandAuditLog.length,
+    azurePromptParserConfigured: isAzureConfigured(),
     uptimeSec: Math.round(process.uptime()),
   });
 });
@@ -473,7 +1143,11 @@ Simple REST (Foundry / curl / Postman):
   GET  /health                       Health check
   GET  /tools                        List tools
   GET  /agent-instructions           Foundry prompt rule to enforce strict tool use
-  POST /command                      { tool, args } - run a tool
+  GET  /prompt-template              Deterministic LLM prompt template
+  GET  /debug/commands               Recent command lifecycle logs
+  POST /command                      { action, params } OR { tool, args }
+  POST /command/batch                { commands: [ ... ] }
+  POST /command/from-prompt          { prompt, context? } -> strict JSON commands
   POST /mcp                          Official MCP Streamable HTTP transport
   GET  /mcp                          MCP SSE notifications stream
   DELETE /mcp                        MCP session termination
@@ -501,20 +1175,164 @@ app.get("/agent-instructions", (_req, res) => {
   res.type("text/plain").send(FOUNDRY_AGENT_RULE);
 });
 
-app.post("/command", async (req, res) => {
+app.get("/prompt-template", (_req, res) => {
+  res.type("text/plain").send(buildPromptTemplate());
+});
+
+app.get("/debug/commands", (req, res) => {
+  const limit = Math.max(1, Math.min(Number(req.query?.limit || 50), 200));
+  const recentAudit = commandAuditLog.slice(-limit);
+  const recentQueue = commandQueue.slice(-limit).map((cmd) => ({
+    id: cmd.id,
+    traceId: cmd.traceId,
+    source: cmd.source,
+    tool: cmd.tool,
+    status: cmd.status,
+    error: cmd.error,
+    createdAt: cmd.createdAt,
+    completedAt: cmd.completedAt,
+    jsxPreview: cmd.jsxPreview,
+    debug: cmd.debug,
+  }));
+  res.json({
+    count: recentAudit.length,
+    audit: recentAudit,
+    queue: recentQueue,
+  });
+});
+
+app.post("/command/from-prompt", async (req, res) => {
+  const traceId = randomUUID();
   try {
-    const tool = req.body?.tool;
-    const args = req.body?.args ?? req.body?.params ?? {};
-    if (!tool || typeof tool !== "string") {
-      return res.status(400).json({ error: "Body must include { tool: string, args?: object }" });
+    const prompt = req.body?.prompt;
+    const context = req.body?.context || {};
+    const dryRun = req.body?.dryRun === true;
+
+    if (!prompt || typeof prompt !== "string") {
+      return res.status(400).json({ error: "Body must include { prompt: string }" });
     }
-    if (!TOOL_NAMES.has(tool)) {
-      return res.status(404).json({ error: `Unknown tool: ${tool}` });
+
+    const parsed = await parsePromptWithAzure(prompt, context);
+    logEvent("info", "llm_prompt_parsed", {
+      traceId,
+      prompt,
+      commandCount: parsed.commands.length,
+      commands: parsed.commands,
+    });
+    pushCommandAudit("llm_prompt_parsed", {
+      traceId,
+      prompt,
+      commands: parsed.commands,
+    });
+
+    if (dryRun) {
+      return res.json({
+        status: "parsed",
+        traceId,
+        prompt,
+        commands: parsed.commands,
+      });
     }
-    const result = await runTool(tool, args);
-    res.json({ status: "completed", tool, result });
+
+    const plan = {
+      action: "llm_prompt_plan",
+      protocol: "llm",
+      commands: parsed.commands,
+    };
+    const execution = await executePlannedCommands(plan, {
+      wait: req.body?.wait !== false,
+      source: "llm_prompt",
+      traceId,
+    });
+    res.json({ status: "completed", ...execution });
   } catch (err) {
-    res.status(504).json({ status: "failed", error: err?.message || String(err) });
+    logEvent("error", "llm_prompt_failed", {
+      traceId,
+      error: err?.message || String(err),
+    });
+    res.status(500).json({
+      status: "failed",
+      traceId,
+      error: err?.message || String(err),
+    });
+  }
+});
+
+app.post("/command", async (req, res) => {
+  const traceId = randomUUID();
+  try {
+    const plan = toExecutionPlan(req.body || {});
+    logEvent("info", "command_received", {
+      traceId,
+      requestId: req.requestId,
+      protocol: plan.protocol,
+      action: plan.action,
+      commands: plan.commands,
+    });
+    pushCommandAudit("command_received", {
+      traceId,
+      requestId: req.requestId,
+      protocol: plan.protocol,
+      action: plan.action,
+      commands: plan.commands,
+      rawBody: req.body,
+    });
+
+    const execution = await executePlannedCommands(plan, {
+      wait: req.body?.wait !== false,
+      source: "rest_command",
+      traceId,
+    });
+    res.json({ status: req.body?.wait === false ? "queued" : "completed", ...execution });
+  } catch (err) {
+    const message = err?.message || String(err);
+    const statusCode = /timeout/i.test(message) ? 504 : 400;
+    logEvent("error", "command_failed", {
+      traceId,
+      requestId: req.requestId,
+      error: message,
+      rawBody: req.body,
+    });
+    pushCommandAudit("command_failed", {
+      traceId,
+      requestId: req.requestId,
+      error: message,
+      rawBody: req.body,
+    });
+    res.status(statusCode).json({ status: "failed", traceId, error: message });
+  }
+});
+
+app.post("/command/batch", async (req, res) => {
+  const traceId = randomUUID();
+  try {
+    const envelopes = Array.isArray(req.body?.commands) ? req.body.commands : null;
+    if (!envelopes || envelopes.length === 0) {
+      return res.status(400).json({ error: "Body must include { commands: [...] }" });
+    }
+
+    const commands = envelopes
+      .map((envelope) => toExecutionPlan(envelope).commands)
+      .flat();
+
+    const execution = await executePlannedCommands(
+      {
+        action: "batch",
+        protocol: "batch",
+        commands,
+      },
+      {
+        wait: req.body?.wait !== false,
+        source: "rest_batch_command",
+        traceId,
+      }
+    );
+
+    res.json({ status: req.body?.wait === false ? "queued" : "completed", ...execution });
+  } catch (err) {
+    const message = err?.message || String(err);
+    const statusCode = /timeout/i.test(message) ? 504 : 400;
+    res.status(statusCode).json({ status: "failed", traceId, error: message });
   }
 });
 
@@ -527,43 +1345,107 @@ app.get("/api/tools", (_req, res) => {
   res.json({ tools: TOOLS, count: TOOLS.length });
 });
 
-app.post("/api/command", (req, res) => {
-  const tool = req.body?.tool;
-  const params = req.body?.args ?? req.body?.params ?? {};
-  const wait = req.body?.wait !== false;
+app.post("/api/command", async (req, res) => {
+  const traceId = randomUUID();
+  try {
+    const plan = toExecutionPlan(req.body || {});
+    const wait = req.body?.wait !== false;
 
-  if (!tool || typeof tool !== "string") {
-    return res.status(400).json({ error: "Body must include { tool: string, args?: object }" });
+    logEvent("info", "legacy_command_received", {
+      traceId,
+      requestId: req.requestId,
+      protocol: plan.protocol,
+      action: plan.action,
+      commands: plan.commands,
+      wait,
+    });
+    pushCommandAudit("legacy_command_received", {
+      traceId,
+      requestId: req.requestId,
+      protocol: plan.protocol,
+      action: plan.action,
+      commands: plan.commands,
+      wait,
+      rawBody: req.body,
+    });
+
+    const execution = await executePlannedCommands(plan, {
+      wait,
+      source: "legacy_api_command",
+      traceId,
+    });
+
+    if (!wait) {
+      const queuedIds = execution.results.map((r) => r.commandId).filter(Boolean);
+      if (queuedIds.length === 1) {
+        return res.json({ commandId: queuedIds[0], status: "queued", traceId });
+      }
+      return res.json({ commandIds: queuedIds, status: "queued", traceId });
+    }
+
+    if (execution.results.length === 1) {
+      const single = execution.results[0];
+      return res.json({
+        commandId: single.commandId || null,
+        status: single.status,
+        traceId,
+        tool: single.tool,
+        result: single.result,
+      });
+    }
+
+    return res.json({
+      status: "completed",
+      traceId,
+      action: execution.action,
+      results: execution.results,
+      commands: execution.commands,
+    });
+  } catch (err) {
+    const message = err?.message || String(err);
+    const statusCode = /timeout/i.test(message) ? 504 : 400;
+    logEvent("error", "legacy_command_failed", {
+      traceId,
+      requestId: req.requestId,
+      error: message,
+      rawBody: req.body,
+    });
+    pushCommandAudit("legacy_command_failed", {
+      traceId,
+      requestId: req.requestId,
+      error: message,
+      rawBody: req.body,
+    });
+    return res.status(statusCode).json({ status: "failed", traceId, error: message });
   }
-  if (!TOOL_NAMES.has(tool)) {
-    return res.status(404).json({ error: `Unknown tool: ${tool}` });
-  }
-
-  const cmd = enqueueCommand(tool, params);
-
-  if (!wait) {
-    return res.json({ commandId: cmd.id, status: "queued" });
-  }
-
-  awaitCommand(cmd)
-    .then((result) => res.json({ commandId: cmd.id, status: "completed", result }))
-    .catch((err) =>
-      res.status(504).json({ commandId: cmd.id, status: "failed", error: err.message })
-    );
 });
 
 app.get("/api/commands/pending", (_req, res) => {
   const pending = commandQueue
     .filter((c) => c.status === "pending")
-    .map((c) => ({ id: c.id, tool: c.tool, type: c.tool, params: c.params }));
+    .map((c) => ({
+      id: c.id,
+      traceId: c.traceId,
+      source: c.source,
+      tool: c.tool,
+      type: c.tool,
+      params: c.params,
+      jsxPreview: c.jsxPreview,
+    }));
   res.json(pending);
 });
 
 app.post("/api/command/:id/result", (req, res) => {
   const { id } = req.params;
-  const { result, error, status } = req.body || {};
+  const { result, error, status, debug } = req.body || {};
   const finalStatus = status === "failed" ? "failed" : "completed";
-  const ok = finalizeCommand(id, finalStatus, result, error);
+  const ok = finalizeCommand(id, finalStatus, result, error, debug);
+  if (!ok) {
+    logEvent("warn", "panel_result_unknown_command", {
+      commandId: id,
+      payload: req.body,
+    });
+  }
   res.json({ status: ok ? "ok" : "unknown-id" });
 });
 
@@ -584,8 +1466,22 @@ function buildMcpServer() {
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { name, arguments: args } = req.params;
+    const traceId = randomUUID();
     try {
-      const result = await runTool(name, args || {});
+      logEvent("info", "mcp_tool_call", {
+        traceId,
+        tool: name,
+        args: args || {},
+      });
+      pushCommandAudit("mcp_tool_call", {
+        traceId,
+        tool: name,
+        args: args || {},
+      });
+      const result = await runTool(name, args || {}, {
+        source: "mcp_tool_call",
+        traceId,
+      });
       return {
         content: [
           {
@@ -598,6 +1494,11 @@ function buildMcpServer() {
         ],
       };
     } catch (err) {
+      logEvent("error", "mcp_tool_error", {
+        traceId,
+        tool: name,
+        error: err?.message || String(err),
+      });
       return {
         isError: true,
         content: [{ type: "text", text: `Error: ${err?.message || String(err)}` }],
@@ -703,7 +1604,8 @@ const httpServer = app.listen(PORT, () => {
     `        ${base}/mcp`,
     "",
     `  Simple REST tool list     : GET  ${base}/tools`,
-    `  Simple REST execute       : POST ${base}/command   { tool, args }`,
+    `  Simple REST execute       : POST ${base}/command   { action, params }`,
+    `  Natural language execute  : POST ${base}/command/from-prompt { prompt }`,
     `  Health check              : GET  ${base}/health`,
     `  AE CEP panel poll URL     : ${base}/api/commands/pending`,
     `  AE CEP panel result URL   : ${base}/api/command/:id/result`,

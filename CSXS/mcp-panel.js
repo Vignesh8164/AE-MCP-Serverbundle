@@ -1,22 +1,36 @@
-let csInterface = (typeof CSInterface !== "undefined") ? new CSInterface() : null;
+﻿let csInterface = (typeof CSInterface !== "undefined") ? new CSInterface() : null;
 let connected = false;
 let serverUrl = "";
+let pollInterval = null;
+let bridgeLoaded = false;
+let bridgeLoading = false;
+let bridgeCallbacks = [];
 
 function getBaseUrl() {
-  let input = document.getElementById('serverUrl').value.trim();
-  let cleanUrl = input.replace(/^https?:\/\//i, '');
-  
-  if (cleanUrl.includes('herokuapp.com')) {
-    return 'https://' + cleanUrl;
-  } else {
-    return 'http://' + cleanUrl;
+  let input = document.getElementById("serverUrl").value.trim();
+  let cleanUrl = input.replace(/^https?:\/\//i, "");
+
+  if (cleanUrl.includes("herokuapp.com")) {
+    return "https://" + cleanUrl;
   }
+  return "http://" + cleanUrl;
 }
-let pollInterval = null;
 
 window.addEventListener("DOMContentLoaded", () => {
-  if (!csInterface) log("Warning: CSInterface unavailable. JSX exec disabled.");
-  log("Panel ready.");
+  if (!csInterface) {
+    log("Warning: CSInterface unavailable. JSX execution disabled.");
+    log("Panel ready.");
+    return;
+  }
+
+  ensureBridgeLoaded((ok, detail) => {
+    if (ok) {
+      log("AE bridge script loaded.");
+    } else {
+      log("Bridge load failed: " + detail);
+    }
+    log("Panel ready.");
+  });
 });
 
 function log(msg) {
@@ -43,26 +57,99 @@ function updateStatus(isConnected) {
   statusEl.className = `status ${isConnected ? "connected" : "disconnected"}`;
 }
 
+function flushBridgeCallbacks(ok, detail) {
+  const callbacks = bridgeCallbacks.slice();
+  bridgeCallbacks = [];
+  callbacks.forEach((cb) => {
+    try {
+      cb(ok, detail);
+    } catch (_err) {
+      // Ignore callback errors
+    }
+  });
+}
+
+function ensureBridgeLoaded(callback) {
+  if (!csInterface) {
+    callback(false, "CSInterface unavailable");
+    return;
+  }
+
+  if (bridgeLoaded) {
+    callback(true, "already loaded");
+    return;
+  }
+
+  bridgeCallbacks.push(callback);
+
+  if (bridgeLoading) {
+    return;
+  }
+
+  bridgeLoading = true;
+
+  const extensionRoot = String(csInterface.getSystemPath(SystemPath.EXTENSION) || "").replace(/\\/g, "/");
+  const bridgePath = `${extensionRoot}/jsx/ae-bridge.jsx`;
+
+  const loaderScript = `(function(){\n`
+    + `  try {\n`
+    + `    var bridgeFile = new File(${JSON.stringify(bridgePath)});\n`
+    + `    if (!bridgeFile.exists) {\n`
+    + `      return "__AE_BRIDGE_MISSING__:" + bridgeFile.fsName;\n`
+    + `    }\n`
+    + `    $.evalFile(bridgeFile);\n`
+    + `    if (typeof dispatchCommand !== "function") {\n`
+    + `      return "__AE_BRIDGE_INVALID__";\n`
+    + `    }\n`
+    + `    return "__AE_BRIDGE_READY__";\n`
+    + `  } catch (e) {\n`
+    + `    return "__AE_BRIDGE_ERROR__:" + e.toString();\n`
+    + `  }\n`
+    + `})()`;
+
+  csInterface.evalScript(loaderScript, (result) => {
+    bridgeLoading = false;
+    const resultText = String(result || "");
+
+    if (resultText === "__AE_BRIDGE_READY__") {
+      bridgeLoaded = true;
+      flushBridgeCallbacks(true, "ready");
+      return;
+    }
+
+    const detail = resultText || "Unknown bridge load failure";
+    flushBridgeCallbacks(false, detail);
+  });
+}
+
 function connect() {
   const urlInput = document.getElementById("serverUrl");
   serverUrl = urlInput.value || "ae-mcp-server-2026.herokuapp.com";
 
-  const base = getBaseUrl();
-  log(`Connecting to ${base}...`);
-  fetch(`${base}/api/commands/pending`)
-    .then(res => {
-      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
-      return res.json();
-    })
-    .then(() => {
-      updateStatus(true);
-      log(`Connected to MCP server at ${base}`);
-      startPolling();
-    })
-    .catch(err => {
-      log(`Connection failed: ${err.message} (URL: ${base}/api/commands/pending)`);
+  ensureBridgeLoaded((bridgeOk, bridgeDetail) => {
+    if (!bridgeOk) {
+      log(`Connection blocked: AE bridge unavailable (${bridgeDetail})`);
       updateStatus(false);
-    });
+      return;
+    }
+
+    const base = getBaseUrl();
+    log(`Connecting to ${base}...`);
+    fetch(`${base}/api/commands/pending`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+        return res.json();
+      })
+      .then(() => {
+        updateStatus(true);
+        log(`Connected to MCP server at ${base}`);
+        startPolling();
+      })
+      .catch((err) => {
+        log(`Connection failed: ${err.message} (URL: ${base}/api/commands/pending)`);
+        updateStatus(false);
+      });
+  });
 }
 
 function disconnect() {
@@ -79,19 +166,19 @@ function startPolling() {
 
     const base = getBaseUrl();
     fetch(`${base}/api/commands/pending`)
-      .then(res => {
+      .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
         return res.json();
       })
-      .then(commands => {
-        if (commands.length === 0) return;
+      .then((commands) => {
+        if (!Array.isArray(commands) || commands.length === 0) return;
 
-        commands.forEach(cmd => {
+        commands.forEach((cmd) => {
           log(`Executing: ${cmd.type} (${cmd.id})`);
           executeCommand(cmd);
         });
       })
-      .catch(err => {
+      .catch((err) => {
         log(`Poll error: ${err.message} (URL: ${base}/api/commands/pending)`);
         updateStatus(false);
       });
@@ -105,174 +192,95 @@ function stopPolling() {
   }
 }
 
+function buildDispatchCommand(tool, params) {
+  const safeTool = JSON.stringify(String(tool || ""));
+  const safeParams = JSON.stringify(params || {});
+  return `JSON.stringify(dispatchCommand(${safeTool}, ${safeParams}))`;
+}
+
 function executeCommand(cmd) {
+  if (!cmd || !cmd.id) {
+    return;
+  }
+
   try {
-    let jsxCode = "";
-
-    switch (cmd.type) {
-      case "create_composition":
-        jsxCode = buildCreateComp(cmd.params);
-        break;
-      case "add_layer":
-        jsxCode = buildAddLayer(cmd.params);
-        break;
-      case "modify_property":
-        jsxCode = buildModifyProperty(cmd.params);
-        break;
-      case "duplicate_layer":
-        jsxCode = buildDuplicateLayer(cmd.params);
-        break;
-      case "delete_layer":
-        jsxCode = buildDeleteLayer(cmd.params);
-        break;
-      case "set_blend_mode":
-        jsxCode = buildSetBlendMode(cmd.params);
-        break;
-      case "add_shape_layer":
-        jsxCode = buildAddShapeLayer(cmd.params);
-        break;
-      case "set_3d_property":
-        jsxCode = buildSet3DProperty(cmd.params);
-        break;
-      case "batch_modify_property":
-        jsxCode = buildBatchModifyProperty(cmd.params);
-        break;
-      case "get_active_comp_info":
-        jsxCode = "JSON.stringify(getActiveCompInfo())";
-        break;
-      case "apply_expression":
-        jsxCode = buildApplyExpression(cmd.params);
-        break;
-      case "add_effect":
-        jsxCode = buildAddEffect(cmd.params);
-        break;
-      case "set_keyframe":
-        jsxCode = buildSetKeyframe(cmd.params);
-        break;
-      case "create_null_and_parent":
-        jsxCode = buildCreateNullAndParent(cmd.params);
-        break;
-      case "render_comp":
-        jsxCode = buildRenderComp(cmd.params);
-        break;
-      case "execute_arbitrary_jsx":
-        jsxCode = cmd.params.jsxCode;
-        break;
-      default:
-        jsxCode = `JSON.stringify(dispatchCommand("${cmd.type}", ${JSON.stringify(cmd.params || {})}))`;
-        break;
-    }
-
-    log(`JSX: ${jsxCode.substring(0, 50)}...`);
-
     if (!csInterface) {
-      reportResult(cmd.id, "failed", null, "CSInterface unavailable");
+      reportResult(cmd.id, "failed", null, "CSInterface unavailable", {
+        command: cmd.type,
+      });
       return;
     }
-    csInterface.evalScript(jsxCode, (result) => {
-      reportResult(cmd.id, "completed", result, null);
+
+    ensureBridgeLoaded((bridgeOk, bridgeDetail) => {
+      if (!bridgeOk) {
+        reportResult(cmd.id, "failed", null, `AE bridge unavailable: ${bridgeDetail}`, {
+          command: cmd.type,
+        });
+        return;
+      }
+
+      const params = cmd.params || {};
+      const jsxCode = buildDispatchCommand(cmd.type, params);
+      const jsxPreview = jsxCode.substring(0, 400);
+      log(`JSX: ${jsxPreview}${jsxCode.length > 400 ? "..." : ""}`);
+
+      csInterface.evalScript(jsxCode, (result) => {
+        let parsed = result;
+        let parseError = null;
+
+        try {
+          if (typeof result === "string") {
+            parsed = JSON.parse(result);
+          }
+        } catch (err) {
+          parseError = err && err.message ? err.message : String(err);
+          parsed = result;
+        }
+
+        const resultText = typeof parsed === "string" ? parsed : JSON.stringify(parsed);
+        log(`AE result: ${resultText}`);
+
+        const debugInfo = {
+          command: cmd.type,
+          jsxPreview,
+          rawResult: typeof result === "string" ? result : String(result),
+          parseError,
+          parsedType: typeof parsed,
+        };
+
+        if (typeof parsed === "object" && parsed !== null && parsed.success === false) {
+          reportResult(cmd.id, "failed", null, parsed.error || "AE operation failed", debugInfo);
+          return;
+        }
+
+        if (typeof parsed === "string" && parsed.toLowerCase().includes("error")) {
+          reportResult(cmd.id, "failed", null, parsed, debugInfo);
+          return;
+        }
+
+        reportResult(cmd.id, "completed", parsed, null, debugInfo);
+      });
     });
   } catch (err) {
-    reportResult(cmd.id, "failed", null, err.message);
+    reportResult(cmd.id, "failed", null, err.message, {
+      command: cmd.type,
+    });
   }
 }
 
-function buildCreateComp(params) {
-  const { name, width, height, duration, frameRate } = params;
-  return `JSON.stringify(createComposition("${name}", ${width}, ${height}, ${duration}, ${frameRate}))`;
-}
-
-function buildAddLayer(params) {
-  const { compName, layerName, layerType } = params;
-  return `JSON.stringify(addLayer("${compName}", "${layerName}", "${layerType}"))`;
-}
-
-function buildModifyProperty(params) {
-  const { compName, layerName, property, value } = params;
-  const valStr = Array.isArray(value) ? `[${value.join(", ")}]` : value;
-  return `JSON.stringify(modifyLayerProperty("${compName}", "${layerName}", "${property}", ${valStr}))`;
-}
-
-function buildDuplicateLayer(params) {
-  const { layerName, newName } = params;
-  const newNameStr = newName ? `"${newName}"` : "undefined";
-  return `JSON.stringify(duplicateLayer("${layerName}", ${newNameStr}))`;
-}
-
-function buildDeleteLayer(params) {
-  const { layerName } = params;
-  return `JSON.stringify(deleteLayer("${layerName}"))`;
-}
-
-function buildSetBlendMode(params) {
-  const { layerName, blendMode, trackMatte } = params;
-  const matteStr = trackMatte ? `"${trackMatte}"` : "undefined";
-  return `JSON.stringify(setBlendMode("${layerName}", "${blendMode}", ${matteStr}))`;
-}
-
-function buildAddShapeLayer(params) {
-  const { shapeType, layerName, position, size } = params;
-  const nameStr = layerName ? `"${layerName}"` : "undefined";
-  const posStr = Array.isArray(position) ? `[${position.join(", ")}]` : "undefined";
-  const sizeStr = typeof size === "number" ? size : "undefined";
-  return `JSON.stringify(addShapeLayer("${shapeType}", ${nameStr}, ${posStr}, ${sizeStr}))`;
-}
-
-function buildSet3DProperty(params) {
-  const { layerName, enable3D, zPosition, zRotation } = params;
-  const zPosStr = typeof zPosition === "number" ? zPosition : "undefined";
-  const zRotStr = typeof zRotation === "number" ? zRotation : "undefined";
-  return `JSON.stringify(set3DProperty("${layerName}", ${enable3D}, ${zPosStr}, ${zRotStr}))`;
-}
-
-function buildBatchModifyProperty(params) {
-  const { layerNames, propertyName, value } = params;
-  const layersStr = JSON.stringify(layerNames || []);
-  const valStr = Array.isArray(value) ? `[${value.join(", ")}]` : value;
-  return `JSON.stringify(batchModifyProperty(${layersStr}, "${propertyName}", ${valStr}))`;
-}
-
-function buildApplyExpression(params) {
-  const { layerName, propertyName, expression } = params;
-  return `JSON.stringify(applyExpression("${layerName}", "${propertyName}", ${JSON.stringify(expression)}))`;
-}
-
-function buildAddEffect(params) {
-  const { layerName, effectMatchName } = params;
-  return `JSON.stringify(addEffect("${layerName}", "${effectMatchName}"))`;
-}
-
-function buildSetKeyframe(params) {
-  const { layerName, propertyName, timeInSeconds, value } = params;
-  const valStr = Array.isArray(value) ? `[${value.join(", ")}]` : value;
-  return `JSON.stringify(setKeyframe("${layerName}", "${propertyName}", ${timeInSeconds}, ${valStr}))`;
-}
-
-function buildCreateNullAndParent(params) {
-  const { targetLayerName, nullName } = params;
-  const nullNameStr = nullName ? `"${nullName}"` : "undefined";
-  return `JSON.stringify(createNullAndParent("${targetLayerName}", ${nullNameStr}))`;
-}
-
-function buildRenderComp(params) {
-  const { compName, outputPath } = params;
-  const pathStr = outputPath ? `"${outputPath}"` : "undefined";
-  return `JSON.stringify(renderComp("${compName}", ${pathStr}))`;
-}
-
-function reportResult(cmdId, status, result, error) {
+function reportResult(cmdId, status, result, error, debug) {
   const base = getBaseUrl();
   const url = `${base}/api/command/${cmdId}/result`;
   fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status, result, error })
+    body: JSON.stringify({ status, result, error, debug })
   })
-  .then(res => {
-    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
-    log(`Result reported: ${cmdId} = ${status}`);
-  })
-  .catch(err => {
-    log(`Report error: ${err.message} (URL: ${url})`);
-  });
+    .then((res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      log(`Result reported: ${cmdId} = ${status}`);
+    })
+    .catch((err) => {
+      log(`Report error: ${err.message} (URL: ${url})`);
+    });
 }
