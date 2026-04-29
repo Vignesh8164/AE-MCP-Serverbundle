@@ -1,0 +1,86 @@
+{
+  "mcpVersion": "0.1.0",
+  "name": "After Effects MCP Server",
+  "description": "10-tool MCP server for After Effects automation",
+  "tools": [
+    {
+      "name": "create_composition",
+      "description": "Create new After Effects composition",
+      "category": "CRUD"
+    },
+    {
+      "name": "add_layer",
+      "description": "Add layer to composition",
+      "category": "CRUD"
+    },
+    {
+      "name": "modify_property",
+      "description": "Modify layer property (position, opacity, scale, rotation)",
+      "category": "CRUD"
+    },
+    {
+      "name": "get_active_comp_info",
+      "description": "Query active composition details",
+      "category": "Query"
+    },
+    {
+      "name": "apply_expression",
+      "description": "Apply JavaScript expression to layer property",
+      "category": "Animation"
+    },
+    {
+      "name": "add_effect",
+      "description": "Add visual effect to layer",
+      "category": "Effects"
+    },
+    {
+      "name": "set_keyframe",
+      "description": "Set keyframe on layer property at specific time",
+      "category": "Animation"
+    },
+    {
+      "name": "create_null_and_parent",
+      "description": "Create null layer and parent target layer to it",
+      "category": "Structure"
+    },
+    {
+      "name": "render_comp",
+      "description": "Add composition to render queue with H.264 output",
+      "category": "Output"
+    },
+    {
+      "name": "execute_arbitrary_jsx",
+      "description": "Execute arbitrary ExtendScript code (dangerous operations blocked)",
+      "category": "Advanced"
+    }
+  ],
+  "capabilities": {
+    "create": true,
+    "read": true,
+    "update": true,
+    "delete": false,
+    "batch": false,
+    "async": true
+  },
+  "bridge": {
+    "type": "http",
+    "endpoint": "http://localhost:3000",
+    "polling": {
+      "interval": 500,
+      "timeout": 30000
+    },
+    "cepExtension": {
+      "id": "com.adobe.ae.mcpbridge",
+      "manifest": "./CSXS/manifest-mcp.xml",
+      "panelPath": "./CSXS/mcp-panel.html"
+    }
+  },
+  "supportedApplications": [
+    {
+      "name": "After Effects",
+      "minVersion": "18.0",
+      "maxVersion": "24.9",
+      "hostId": "AEFT"
+    }
+  ]
+}

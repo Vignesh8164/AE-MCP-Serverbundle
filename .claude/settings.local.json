@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/vignesh/AppData/Roaming/Adobe/CEP/extensions/**)",
+      "Read(//c/Program Files \\(x86\\)/Common Files/Adobe/CEP/extensions/**)",
+      "Bash(rm -rf C:/Users/vignesh/AppData/Roaming/Adobe/CEP/extensions/com.aemcp.bridge)",
+      "Bash(mkdir -p C:/Users/vignesh/AppData/Roaming/Adobe/CEP/extensions/com.aemcp.bridge/CSXS C:/Users/vignesh/AppData/Roaming/Adobe/CEP/extensions/com.aemcp.bridge/jsx C:/Users/vignesh/AppData/Roaming/Adobe/CEP/extensions/com.aemcp.bridge/dist)",
+      "Bash(cp 'D:/AE-AI plugin/AE-MCP-Server/CSXS/manifest.xml' C:/Users/vignesh/AppData/Roaming/Adobe/CEP/extensions/com.aemcp.bridge/CSXS/)",
+      "Bash(cp 'D:/AE-AI plugin/AE-MCP-Server/CSXS/mcp-panel.html' C:/Users/vignesh/AppData/Roaming/Adobe/CEP/extensions/com.aemcp.bridge/CSXS/)",
+      "Bash(cp 'D:/AE-AI plugin/AE-MCP-Server/CSXS/mcp-panel.js' C:/Users/vignesh/AppData/Roaming/Adobe/CEP/extensions/com.aemcp.bridge/CSXS/)",
+      "Bash(reg query *)",
+      "Bash(cp 'D:/AE-AI plugin/AE-MCP-Server/CSXS/csinterface.js' C:/Users/vignesh/AppData/Roaming/Adobe/CEP/extensions/com.aemcp.bridge/CSXS/)",
+      "Bash(npm run *)",
+      "Bash(cp 'D:/AE-AI plugin/AE-MCP-Server/jsx/ae-bridge.jsx' C:/Users/vignesh/AppData/Roaming/Adobe/CEP/extensions/com.aemcp.bridge/jsx/)",
+      "Bash(cp -r 'D:/AE-AI plugin/AE-MCP-Server/dist/.' C:/Users/vignesh/AppData/Roaming/Adobe/CEP/extensions/com.aemcp.bridge/dist/)",
+      "Bash(gh api *)",
+      "Bash(npm install *)",
+      "Bash(node dist/mcp/server.js)",
+      "Bash(curl -s http://localhost:3000/api/tools)",
+      "PowerShell(Get-NetTCPConnection -LocalPort 3000 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue; \"killed $_\" })",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('count:',d['count']\\); print\\('first3:',[t['name'] for t in d['tools'][:3]]\\)\")",
+      "Bash(timeout 8 node mcp-wrapper.mjs)",
+      "Bash(python -c \"import sys,json; print\\('tool_count:', json.load\\(sys.stdin\\)['count']\\)\")"
+    ]
+  }
+}

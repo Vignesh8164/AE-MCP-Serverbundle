@@ -1,0 +1,35 @@
+{
+  "name": "ae-mcp-server",
+  "version": "1.0.0",
+  "description": "HTTP MCP server for After Effects automation (102 tools) - Heroku / Azure AI Foundry ready",
+  "main": "mcp-wrapper-http.mjs",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node mcp-wrapper-http.mjs",
+    "start:http": "node mcp-wrapper-http.mjs",
+    "start:legacy": "node dist/mcp/server.js",
+    "mcp:build": "tsc -p tsconfig.json",
+    "mcp:server": "node dist/mcp/server.js",
+    "mcp:wrapper": "node mcp-wrapper.mjs",
+    "mcp:stdio": "node mcp-wrapper.mjs",
+    "dev": "node mcp-wrapper-http.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^4.17.25",
+    "@types/node": "^20.19.39",
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.9.3"
+  },
+  "author": "AE-AI Assistant",
+  "license": "MIT"
+}
