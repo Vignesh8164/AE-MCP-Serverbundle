@@ -85,6 +85,8 @@ const SERVER_URL =
   `http://localhost:${PORT}`;
 const SERVER_NAME = "ae-mcp-server";
 const SERVER_VERSION = "1.0.0";
+const FOUNDRY_AGENT_RULE =
+  "You MUST follow tool descriptions strictly. If a tool says 'ONLY for NEW', never use it for existing items. If a tool says 'ONLY for EXISTING', never use it to create new items. Prefer the most specific matching tool.";
 
 // --------------------------------------------------------------------------
 // Tool registry - 102 After Effects tools
@@ -196,6 +198,83 @@ const TOOL_DEFS = [
   ["shape_transfer",              "Copy first shape path from src to dst layer"],
 ];
 
+const GLOBAL_TOOL_SELECTION_RULES = [
+  "Tool Selection Rules:",
+  "- Follow this tool description strictly.",
+  "- If this tool says ONLY for NEW items, never use it for existing items.",
+  "- If this tool says ONLY for EXISTING items, never use it to create new items.",
+  "- Prefer the most specific tool over generic alternatives.",
+  "- Do not switch tools unless required args are missing or unsupported.",
+].join("\n");
+
+const TOOL_DESCRIPTION_OVERRIDES = {
+  create_composition:
+    "Use ONLY when creating a NEW composition from scratch. Never use for updating existing compositions. Required intent: create a brand-new comp. Typical args: name, width, height, duration, frameRate.",
+  create_comp_advanced:
+    "Use ONLY when creating a NEW composition from scratch with advanced options (pixel aspect, background color). Never use for updating existing compositions.",
+  comp_settings:
+    "Use ONLY when updating an EXISTING composition's settings (size, duration, frame rate, bg color, name). Never use for creating new compositions. For new comps use create_composition or create_comp_advanced.",
+  add_layer:
+    "Use ONLY when adding a NEW layer into an existing composition. Never use for modifying existing layer properties.",
+  modify_property:
+    "Use ONLY when changing an EXISTING property on an existing layer. Never use for creating new compositions or new layers.",
+  apply_expression:
+    "Use ONLY when applying a direct expression string to a known layer property. Never use for non-expression property edits.",
+  apply_expression_smart:
+    "Use ONLY when expression target resolution is ambiguous and smart fallback is required. Prefer apply_expression when exact property target is known.",
+  add_effect:
+    "Use ONLY when adding a NEW effect to an existing layer. Never use for editing an already-added effect's parameters.",
+  add_effect_advanced:
+    "Use ONLY when adding a NEW effect and setting initial parameter values in one step. Never use for unrelated layer/property edits.",
+  set_keyframe:
+    "Use ONLY when creating or updating keyframes on an existing animatable property. Never use for static, non-animated changes.",
+  set_keyframe_ease:
+    "Use ONLY when adjusting interpolation/ease on EXISTING keyframes. Never use for creating compositions or layers.",
+};
+
+function buildStrictToolDescription(name, baseDescription) {
+  const lower = String(name || "").toLowerCase();
+  const base = String(baseDescription || "").trim();
+
+  if (TOOL_DESCRIPTION_OVERRIDES[name]) {
+    return `${GLOBAL_TOOL_SELECTION_RULES}\n\n${TOOL_DESCRIPTION_OVERRIDES[name]}`;
+  }
+
+  if (lower.startsWith("create_") || lower.startsWith("new_")) {
+    return `${GLOBAL_TOOL_SELECTION_RULES}\n\nUse ONLY when creating a NEW item. Never use this tool for updating existing items. Action: ${base}.`;
+  }
+
+  if (lower.startsWith("add_")) {
+    return `${GLOBAL_TOOL_SELECTION_RULES}\n\nUse ONLY when adding a NEW item into an existing target. Never use this tool for modifying existing item settings. Action: ${base}.`;
+  }
+
+  if (lower.startsWith("set_") || lower.endsWith("_settings") || lower === "comp_settings") {
+    return `${GLOBAL_TOOL_SELECTION_RULES}\n\nUse ONLY when updating an EXISTING item. Never use this tool to create new items. Action: ${base}.`;
+  }
+
+  if (lower.startsWith("modify_") || lower.startsWith("apply_") || lower.startsWith("animate_") || lower.startsWith("batch_")) {
+    return `${GLOBAL_TOOL_SELECTION_RULES}\n\nUse ONLY when modifying EXISTING items or properties. Never use this tool for initial creation when a create/add tool exists. Action: ${base}.`;
+  }
+
+  if (lower.startsWith("get_") || lower.includes("search") || lower.includes("browser") || lower.includes("revealer") || lower.includes("info")) {
+    return `${GLOBAL_TOOL_SELECTION_RULES}\n\nUse ONLY for read/query/inspection. Never use this tool for mutations. Action: ${base}.`;
+  }
+
+  if (lower.startsWith("delete_") || lower.includes("cleanup") || lower.includes("close_project")) {
+    return `${GLOBAL_TOOL_SELECTION_RULES}\n\nUse ONLY for destructive/removal operations. Never use this tool for creation or updates. Action: ${base}.`;
+  }
+
+  if (lower.startsWith("duplicate_")) {
+    return `${GLOBAL_TOOL_SELECTION_RULES}\n\nUse ONLY when cloning existing items. Never use this tool as a substitute for create/add with custom initialization. Action: ${base}.`;
+  }
+
+  if (lower.includes("render") || lower.includes("export") || lower.includes("save_project")) {
+    return `${GLOBAL_TOOL_SELECTION_RULES}\n\nUse ONLY for output/render/export/save workflows. Never use this tool for structural timeline edits unless explicitly part of render setup. Action: ${base}.`;
+  }
+
+  return `${GLOBAL_TOOL_SELECTION_RULES}\n\nUse this tool ONLY for its stated action. Action: ${base}.`;
+}
+
 const TOOL_SCHEMAS = {
   create_composition: {
     type: "object",
@@ -213,7 +292,7 @@ const TOOL_SCHEMAS = {
 
 const TOOLS = TOOL_DEFS.map(([name, description]) => ({
   name,
-  description,
+  description: buildStrictToolDescription(name, description),
   inputSchema:
     TOOL_SCHEMAS[name] || {
       type: "object",
@@ -393,6 +472,7 @@ FOR AZURE AI FOUNDRY
 Simple REST (Foundry / curl / Postman):
   GET  /health                       Health check
   GET  /tools                        List tools
+  GET  /agent-instructions           Foundry prompt rule to enforce strict tool use
   POST /command                      { tool, args } - run a tool
   POST /mcp                          Official MCP Streamable HTTP transport
   GET  /mcp                          MCP SSE notifications stream
@@ -415,6 +495,10 @@ FOR THE AFTER EFFECTS CEP PANEL
 // ---------- Simple REST (Azure Foundry / curl) ----------
 app.get("/tools", (_req, res) => {
   res.json({ tools: TOOLS, count: TOOLS.length });
+});
+
+app.get("/agent-instructions", (_req, res) => {
+  res.type("text/plain").send(FOUNDRY_AGENT_RULE);
 });
 
 app.post("/command", async (req, res) => {
