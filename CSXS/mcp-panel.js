@@ -5,6 +5,9 @@ let pollInterval = null;
 let bridgeLoaded = false;
 let bridgeLoading = false;
 let bridgeCallbacks = [];
+const inFlightCommandIds = new Set();
+const processedCommandIds = new Set();
+const reportRetryTimers = new Map();
 
 function normalizeBaseUrl(rawUrl) {
   const input = String(rawUrl || "").trim();
@@ -290,6 +293,13 @@ function startPolling() {
         if (!Array.isArray(commands) || commands.length === 0) return;
 
         commands.forEach((cmd) => {
+          if (!cmd || !cmd.id) {
+            return;
+          }
+          if (processedCommandIds.has(cmd.id) || inFlightCommandIds.has(cmd.id)) {
+            return;
+          }
+          inFlightCommandIds.add(cmd.id);
           log(`Executing: ${cmd.type} (${cmd.id})`);
           executeCommand(cmd);
         });
@@ -313,6 +323,26 @@ function stopPolling() {
   }
 }
 
+function clearCommandTracking(commandId) {
+  inFlightCommandIds.delete(commandId);
+  const timer = reportRetryTimers.get(commandId);
+  if (timer) {
+    clearTimeout(timer);
+    reportRetryTimers.delete(commandId);
+  }
+}
+
+function scheduleReportRetry(commandId, payload) {
+  if (reportRetryTimers.has(commandId)) {
+    return;
+  }
+  const timer = setTimeout(() => {
+    reportRetryTimers.delete(commandId);
+    reportResult(commandId, payload.status, payload.result, payload.error, payload.debug, true);
+  }, 1000);
+  reportRetryTimers.set(commandId, timer);
+}
+
 function buildDispatchCommand(tool, params) {
   const safeTool = JSON.stringify(String(tool || ""));
   const safeParams = JSON.stringify(params || {});
@@ -321,6 +351,10 @@ function buildDispatchCommand(tool, params) {
 
 function executeCommand(cmd) {
   if (!cmd || !cmd.id) {
+    return;
+  }
+
+  if (processedCommandIds.has(cmd.id)) {
     return;
   }
 
@@ -390,10 +424,24 @@ function executeCommand(cmd) {
 }
 
 function reportResult(cmdId, status, result, error, debug) {
+  if (processedCommandIds.has(cmdId)) {
+    return;
+  }
+
   const base = getBaseUrl();
   const url = `${base}/api/command/${cmdId}/result`;
-  xhrRequest("POST", url, { status, result, error, debug })
+  const payload = {
+    success: status !== "failed",
+    status,
+    result: result || {},
+    error: error || null,
+    debug,
+  };
+
+  xhrRequest("POST", url, payload)
     .then(() => {
+      processedCommandIds.add(cmdId);
+      clearCommandTracking(cmdId);
       log(`Result reported: ${cmdId} = ${status} (URL: ${url})`);
     })
     .catch((err) => {
@@ -403,5 +451,7 @@ function reportResult(cmdId, status, result, error, debug) {
         const message = err && err.message ? err.message : String(err);
         log(`Report error: ${message} (URL: ${url})`);
       }
+
+      scheduleReportRetry(cmdId, payload);
     });
 }
