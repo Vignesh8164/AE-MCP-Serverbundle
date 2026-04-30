@@ -12,77 +12,8 @@ function normalizeBaseUrl(rawUrl) {
     return "";
   }
 
-  const hasHttp = /^http:\/\//i.test(input);
-  const cleanHost = input
-    .replace(/^(?:https?:\/\/)+/i, "")
-    .replace(/\/+$/, "");
-
-  if (!cleanHost) {
-    return "";
-  }
-
-  const protocol = hasHttp ? "http://" : "https://";
-  return protocol + cleanHost;
-}
-
-function xhrRequest(method, url, body) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open(method, url, true);
-    xhr.timeout = 15000;
-
-    if (method !== "GET") {
-      xhr.setRequestHeader("Content-Type", "application/json");
-    }
-
-    xhr.onreadystatechange = function () {
-      if (xhr.readyState !== 4) {
-        return;
-      }
-
-      const responseText = xhr.responseText || "";
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve({
-          status: xhr.status,
-          statusText: xhr.statusText || "OK",
-          responseText,
-        });
-      } else {
-        reject({
-          type: "http",
-          status: xhr.status,
-          statusText: xhr.statusText || "",
-          responseText,
-          url,
-          method,
-        });
-      }
-    };
-
-    xhr.onerror = function () {
-      reject({
-        type: "network",
-        message: "Network request failed",
-        status: xhr.status || 0,
-        statusText: xhr.statusText || "",
-        url,
-        method,
-      });
-    };
-
-    xhr.ontimeout = function () {
-      reject({
-        type: "timeout",
-        message: "Network request timed out",
-        status: xhr.status || 0,
-        statusText: xhr.statusText || "",
-        url,
-        method,
-      });
-    };
-
-    xhr.send(body ? JSON.stringify(body) : null);
-  });
+  const withProtocol = /^https?:\/\//i.test(input) ? input : `https://${input}`;
+  return withProtocol.replace(/\/+$/, "");
 }
 
 function getBaseUrl() {
@@ -238,25 +169,19 @@ async function connectToServer() {
     return;
   }
 
-  const healthUrl = url + "/health";
-  log("Attempting connection to " + healthUrl);
+  log("Attempting connection to " + url);
 
   try {
-    const res = await xhrRequest("GET", healthUrl);
+    const res = await fetch(url + "/health");
 
-    log(`Connected successfully (HTTP ${res.status} ${res.statusText}) URL: ${healthUrl}`);
+    if (!res.ok) throw new Error("Server not reachable");
+
+    log("Connected successfully");
     updateStatus(true);
     startPolling();
   } catch (err) {
-    if (err && err.type === "http") {
-      log(`Connection failed: HTTP ${err.status} ${err.statusText} URL: ${healthUrl}`);
-      if (err.responseText) {
-        log(`Connection response: ${err.responseText.substring(0, 500)}`);
-      }
-    } else {
-      const message = err && err.message ? err.message : String(err);
-      log(`Connection failed: ${message} URL: ${healthUrl}`);
-    }
+    const message = err && err.message ? err.message : String(err);
+    log("Connection failed: " + message);
     stopPolling();
     updateStatus(false);
   }
@@ -283,10 +208,12 @@ function startPolling() {
     if (!connected) return;
 
     const base = getBaseUrl();
-    const pendingUrl = `${base}/api/commands/pending`;
-    xhrRequest("GET", pendingUrl)
+    fetch(`${base}/api/commands/pending`)
       .then((res) => {
-        const commands = res.responseText ? JSON.parse(res.responseText) : [];
+        if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+        return res.json();
+      })
+      .then((commands) => {
         if (!Array.isArray(commands) || commands.length === 0) return;
 
         commands.forEach((cmd) => {
@@ -295,12 +222,7 @@ function startPolling() {
         });
       })
       .catch((err) => {
-        if (err && err.type === "http") {
-          log(`Poll error: HTTP ${err.status} ${err.statusText} (URL: ${pendingUrl})`);
-        } else {
-          const message = err && err.message ? err.message : String(err);
-          log(`Poll error: ${message} (URL: ${pendingUrl})`);
-        }
+        log(`Poll error: ${err.message} (URL: ${base}/api/commands/pending)`);
         updateStatus(false);
       });
   }, 500);
@@ -392,16 +314,16 @@ function executeCommand(cmd) {
 function reportResult(cmdId, status, result, error, debug) {
   const base = getBaseUrl();
   const url = `${base}/api/command/${cmdId}/result`;
-  xhrRequest("POST", url, { status, result, error, debug })
-    .then(() => {
-      log(`Result reported: ${cmdId} = ${status} (URL: ${url})`);
+  fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status, result, error, debug })
+  })
+    .then((res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      log(`Result reported: ${cmdId} = ${status}`);
     })
     .catch((err) => {
-      if (err && err.type === "http") {
-        log(`Report error: HTTP ${err.status} ${err.statusText} (URL: ${url})`);
-      } else {
-        const message = err && err.message ? err.message : String(err);
-        log(`Report error: ${message} (URL: ${url})`);
-      }
+      log(`Report error: ${err.message} (URL: ${url})`);
     });
 }
