@@ -118,9 +118,11 @@ interface PendingCmd {
   tool: string;
   params: any;
   type: string;
-  status: 'pending' | 'completed' | 'failed';
+  status: 'pending' | 'assigned' | 'completed' | 'failed';
   result?: any;
   error?: string;
+  assignedAt?: number;
+  completedAt?: number;
   resolve?: (v: any) => void;
   reject?: (e: any) => void;
   timer?: NodeJS.Timeout;
@@ -128,6 +130,29 @@ interface PendingCmd {
 
 let commandQueue: PendingCmd[] = [];
 const COMMAND_TIMEOUT_MS = 30000;
+const ASSIGNED_TIMEOUT_MS = 30000;
+
+function recoverAssignedTimeouts(now = Date.now()) {
+  for (const cmd of commandQueue) {
+    if (cmd.status !== 'assigned') continue;
+    if (!cmd.assignedAt || now - cmd.assignedAt <= ASSIGNED_TIMEOUT_MS) continue;
+    cmd.status = 'failed';
+    cmd.error = 'Assigned command timed out without ACK';
+    cmd.completedAt = now;
+    cmd.reject && cmd.reject(new Error(cmd.error));
+  }
+}
+
+function assignPendingCommands(now = Date.now()) {
+  const assigned: PendingCmd[] = [];
+  for (const cmd of commandQueue) {
+    if (cmd.status !== 'pending') continue;
+    cmd.status = 'assigned';
+    cmd.assignedAt = now;
+    assigned.push(cmd);
+  }
+  return assigned;
+}
 
 const llmProvider = createLLMProvider();
 
@@ -149,9 +174,10 @@ app.post('/api/command', (req, res) => {
   }
 
   cmd.timer = setTimeout(() => {
-    if (cmd.status === 'pending') {
+    if (cmd.status === 'pending' || cmd.status === 'assigned') {
       cmd.status = 'failed';
       cmd.error = 'Timeout waiting for AE panel result';
+      cmd.completedAt = Date.now();
       cmd.reject && cmd.reject(new Error(cmd.error));
     }
   }, COMMAND_TIMEOUT_MS);
@@ -165,10 +191,10 @@ app.post('/api/command', (req, res) => {
 });
 
 app.get('/api/commands/pending', (_req, res) => {
-  const pending = commandQueue
-    .filter((c) => c.status === 'pending')
-    .map((c) => ({ id: c.id, tool: c.tool, type: c.tool, params: c.params }));
-  res.json(pending);
+  recoverAssignedTimeouts(Date.now());
+  const assigned = assignPendingCommands(Date.now())
+    .map((c) => ({ id: c.id, status: c.status, assignedAt: c.assignedAt, tool: c.tool, type: c.tool, params: c.params }));
+  res.json(assigned);
 });
 
 function finalizeCommand(id: string, status: 'completed' | 'failed', result: any, error?: string) {
@@ -178,6 +204,7 @@ function finalizeCommand(id: string, status: 'completed' | 'failed', result: any
   cmd.status = status;
   cmd.result = result;
   cmd.error = error;
+  cmd.completedAt = Date.now();
   if (status === 'completed' && cmd.resolve) cmd.resolve(result);
   if (status === 'failed' && cmd.reject) cmd.reject(new Error(error || 'failed'));
   return true;
@@ -185,8 +212,16 @@ function finalizeCommand(id: string, status: 'completed' | 'failed', result: any
 
 app.post('/api/command/:id/result', (req, res) => {
   const { id } = req.params;
-  const { result, error, status } = req.body;
-  const finalStatus = status === 'failed' ? 'failed' : 'completed';
+  const { result, error, status, success } = req.body || {};
+  const cmd = commandQueue.find((c) => c.id === id);
+  if (!cmd) {
+    return res.json({ status: 'unknown-id' });
+  }
+  if (cmd.status === 'completed' || cmd.status === 'failed') {
+    return res.json({ status: 'already-finalized', commandStatus: cmd.status });
+  }
+  const normalizedStatus = String(status || (success === false ? 'failed' : 'success')).toLowerCase();
+  const finalStatus = normalizedStatus === 'failed' ? 'failed' : 'completed';
   const ok = finalizeCommand(id, finalStatus, result, error);
   res.json({ status: ok ? 'ok' : 'unknown-id' });
 });

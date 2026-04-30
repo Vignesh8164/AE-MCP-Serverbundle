@@ -79,6 +79,7 @@ import {
 
 const PORT = Number(process.env.PORT) || 3000;
 const COMMAND_TIMEOUT_MS = Number(process.env.AE_COMMAND_TIMEOUT_MS) || 60000;
+const ASSIGNED_TIMEOUT_MS = Number(process.env.AE_ASSIGNED_TIMEOUT_MS) || 30000;
 // Public URL of this server. Used only for log output and the index page,
 // so after `heroku config:set SERVER_URL=https://your-app.herokuapp.com`
 // the startup banner shows the exact URL to paste into Azure Foundry.
@@ -788,11 +789,12 @@ function toExecutionPlan(payload) {
  *    type: string,
  *    params: any,
  *    jsxPreview?: string,
- *    status: 'pending' | 'completed' | 'failed',
+ *    status: 'pending' | 'assigned' | 'completed' | 'failed',
  *    result?: any,
  *    error?: string,
  *    debug?: any,
  *    createdAt: number,
+ *    assignedAt?: number,
  *    completedAt?: number,
  *    resolve?: (v: any) => void,
  *    reject?: (e: Error) => void,
@@ -844,7 +846,7 @@ function awaitCommand(cmd) {
     cmd.resolve = resolve;
     cmd.reject = reject;
     cmd.timer = setTimeout(() => {
-      if (cmd.status === "pending") {
+      if (cmd.status === "pending" || cmd.status === "assigned") {
         cmd.status = "failed";
         cmd.error = `Timeout after ${COMMAND_TIMEOUT_MS}ms - is the AE CEP panel connected?`;
         cmd.completedAt = Date.now();
@@ -864,6 +866,85 @@ function awaitCommand(cmd) {
       }
     }, COMMAND_TIMEOUT_MS);
   });
+}
+
+function recoverStuckAssignedCommands(now = Date.now()) {
+  let recovered = 0;
+
+  commandQueue.forEach((cmd) => {
+    if (cmd.status !== "assigned") {
+      return;
+    }
+
+    const assignedAt = Number(cmd.assignedAt || 0);
+    if (!assignedAt || now - assignedAt <= ASSIGNED_TIMEOUT_MS) {
+      return;
+    }
+
+    if (cmd.timer) {
+      clearTimeout(cmd.timer);
+    }
+
+    cmd.status = "failed";
+    cmd.error = `Assigned command timed out after ${ASSIGNED_TIMEOUT_MS}ms without ACK`;
+    cmd.completedAt = now;
+
+    pushCommandAudit("command_assigned_timeout", {
+      id: cmd.id,
+      traceId: cmd.traceId,
+      tool: cmd.tool,
+      assignedAt,
+      completedAt: cmd.completedAt,
+      error: cmd.error,
+    });
+    logEvent("error", "command_assigned_timeout", {
+      commandId: cmd.id,
+      traceId: cmd.traceId,
+      tool: cmd.tool,
+      assignedAt,
+      completedAt: cmd.completedAt,
+      error: cmd.error,
+    });
+
+    if (cmd.reject) {
+      cmd.reject(new Error(cmd.error));
+    }
+
+    recovered += 1;
+  });
+
+  return recovered;
+}
+
+function assignPendingCommands(now = Date.now()) {
+  const assigned = [];
+
+  commandQueue.forEach((cmd) => {
+    if (cmd.status !== "pending") {
+      return;
+    }
+
+    cmd.status = "assigned";
+    cmd.assignedAt = now;
+    assigned.push(cmd);
+
+    pushCommandAudit("command_assigned", {
+      id: cmd.id,
+      traceId: cmd.traceId,
+      source: cmd.source,
+      tool: cmd.tool,
+      assignedAt: cmd.assignedAt,
+    });
+    logEvent("info", "command_assigned", {
+      commandId: cmd.id,
+      traceId: cmd.traceId,
+      source: cmd.source,
+      tool: cmd.tool,
+      assignedAt: cmd.assignedAt,
+    });
+  });
+
+  return assigned;
 }
 
 function finalizeCommand(id, status, result, error, debug) {
@@ -898,9 +979,10 @@ function finalizeCommand(id, status, result, error, debug) {
 
 // Periodic cleanup of finished commands so the queue does not grow forever.
 setInterval(() => {
+  recoverStuckAssignedCommands(Date.now());
   const cutoff = Date.now() - 5 * 60 * 1000; // 5 minutes
   commandQueue = commandQueue.filter(
-    (c) => c.status === "pending" || c.createdAt > cutoff
+    (c) => c.status === "pending" || c.status === "assigned" || (c.completedAt || c.createdAt) > cutoff
   );
 }, 60 * 1000).unref?.();
 
@@ -1420,11 +1502,13 @@ app.post("/api/command", async (req, res) => {
   }
 });
 
-app.get("/api/commands/pending", (_req, res) => {
-  const pending = commandQueue
-    .filter((c) => c.status === "pending")
+app.get("/api/commands/pending", (req, res) => {
+  recoverStuckAssignedCommands(Date.now());
+  const assigned = assignPendingCommands(Date.now())
     .map((c) => ({
       id: c.id,
+      status: c.status,
+      assignedAt: c.assignedAt,
       traceId: c.traceId,
       source: c.source,
       tool: c.tool,
@@ -1432,13 +1516,57 @@ app.get("/api/commands/pending", (_req, res) => {
       params: c.params,
       jsxPreview: c.jsxPreview,
     }));
-  res.json(pending);
+
+  if (assigned.length > 0) {
+    logEvent("info", "pending_commands_assigned_batch", {
+      requestId: req.requestId,
+      count: assigned.length,
+      commandIds: assigned.map((c) => c.id),
+    });
+  }
+
+  res.json(assigned);
 });
 
 app.post("/api/command/:id/result", (req, res) => {
   const { id } = req.params;
-  const { result, error, status, debug } = req.body || {};
-  const finalStatus = status === "failed" ? "failed" : "completed";
+  const { result, error, status, success, debug } = req.body || {};
+  const cmd = commandQueue.find((c) => c.id === id);
+
+  if (!cmd) {
+    logEvent("warn", "panel_result_unknown_command", {
+      commandId: id,
+      payload: req.body,
+    });
+    return res.json({ status: "unknown-id" });
+  }
+
+  if (cmd.status === "completed" || cmd.status === "failed") {
+    return res.json({ status: "already-finalized", commandStatus: cmd.status });
+  }
+
+  const normalizedStatus = String(
+    status || (success === false ? "failed" : "success")
+  ).toLowerCase();
+  const finalStatus = normalizedStatus === "failed" ? "failed" : "completed";
+
+  logEvent("info", "panel_result_received", {
+    commandId: id,
+    traceId: cmd.traceId,
+    previousStatus: cmd.status,
+    finalStatus,
+  });
+
+  pushCommandAudit("panel_result_received", {
+    id: cmd.id,
+    traceId: cmd.traceId,
+    previousStatus: cmd.status,
+    finalStatus,
+    result,
+    error,
+    debug,
+  });
+
   const ok = finalizeCommand(id, finalStatus, result, error, debug);
   if (!ok) {
     logEvent("warn", "panel_result_unknown_command", {

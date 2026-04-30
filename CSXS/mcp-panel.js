@@ -296,6 +296,9 @@ function startPolling() {
           if (!cmd || !cmd.id) {
             return;
           }
+          if (cmd.status !== "assigned") {
+            return;
+          }
           if (processedCommandIds.has(cmd.id) || inFlightCommandIds.has(cmd.id)) {
             return;
           }
@@ -351,6 +354,11 @@ function buildDispatchCommand(tool, params) {
 
 function executeCommand(cmd) {
   if (!cmd || !cmd.id) {
+    return;
+  }
+
+  if (cmd.status && cmd.status !== "assigned") {
+    clearCommandTracking(cmd.id);
     return;
   }
 
@@ -432,7 +440,7 @@ function reportResult(cmdId, status, result, error, debug) {
   const url = `${base}/api/command/${cmdId}/result`;
   const payload = {
     success: status !== "failed",
-    status,
+    status: status === "failed" ? "failed" : "success",
     result: result || {},
     error: error || null,
     debug,
